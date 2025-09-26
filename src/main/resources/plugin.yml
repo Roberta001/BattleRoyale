@@ -1,0 +1,13 @@
+name: BattleRoyale
+version: '1.0-SNAPSHOT'
+main: xyz.leafing.battleRoyale.BattleRoyale
+api-version: '1.21'
+depend: [Vault]
+
+commands:
+  br:
+    description: Main command for the Battle Royale plugin.
+    usage: |
+      /br create <amount> - Starts a new game with an entry fee.
+      /br join - Joins the current game.
+      /br leave - Leaves the game lobby.
