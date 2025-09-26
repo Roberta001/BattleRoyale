@@ -1,12 +1,11 @@
 package xyz.leafing.battleRoyale;
 
-// 不再需要 import MultiverseInventories
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import xyz.leafing.battleRoyale.commands.BRCommand;
 import xyz.leafing.battleRoyale.listeners.PlayerListener;
-import xyz.leafing.battleRoyale.listeners.DataRestoreListener;
+import xyz.leafing.miniGameManager.api.MiniGameAPI; // 导入新的API
 
 import java.util.logging.Logger;
 
@@ -15,36 +14,41 @@ public final class BattleRoyale extends JavaPlugin {
     private static BattleRoyale instance;
     private static final Logger log = Logger.getLogger("Minecraft");
     private Economy econ = null;
+    private MiniGameAPI miniGameAPI = null; // 新增API字段
     private GameManager gameManager;
-    private PlayerDataManager playerDataManager; // 新增字段
 
     @Override
     public void onEnable() {
         instance = this;
 
+        // 检查 Vault 依赖
         if (!setupEconomy()) {
             log.severe(String.format("[%s] - 未找到Vault插件，插件已禁用!", getDescription().getName()));
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
-        // 初始化新的管理器
-        this.playerDataManager = new PlayerDataManager(this);
-        // 将 PlayerDataManager 传入 GameManager
-        this.gameManager = new GameManager(this, playerDataManager);
+        // 检查 MiniGameManager 依赖
+        if (!setupMiniGameManager()) {
+            log.severe(String.format("[%s] - 未找到MiniGameManager插件，插件已禁用!", getDescription().getName()));
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+
+        // 将 MiniGameAPI 传入 GameManager
+        this.gameManager = new GameManager(this, miniGameAPI);
 
         getCommand("br").setExecutor(new BRCommand(gameManager));
         getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
-        // 注册新的数据恢复监听器
-        getServer().getPluginManager().registerEvents(new DataRestoreListener(playerDataManager), this);
+        // 不再需要注册 DataRestoreListener
 
-        getLogger().info("BattleRoyale 插件已成功加载!");
+        getLogger().info("BattleRoyale 插件已成功加载并连接到 MiniGameManager 服务!");
     }
 
     @Override
     public void onDisable() {
         if (gameManager != null && gameManager.getGameState() != GameState.IDLE) {
-            // 这个方法现在会负责恢复所有玩家的数据
+            // 这个方法现在会负责恢复所有玩家的数据并释放他们的状态
             gameManager.forceEndGame();
         }
         getLogger().info("BattleRoyale 插件已卸载。");
@@ -62,9 +66,18 @@ public final class BattleRoyale extends JavaPlugin {
         return econ != null;
     }
 
-    // 移除了 setupMultiverseInventories() 方法
+    // 新增方法：用于获取 MiniGameManager 的 API
+    private boolean setupMiniGameManager() {
+        RegisteredServiceProvider<MiniGameAPI> rsp = getServer().getServicesManager().getRegistration(MiniGameAPI.class);
+        if (rsp == null) {
+            return false;
+        }
+        miniGameAPI = rsp.getProvider();
+        return miniGameAPI != null;
+    }
 
     public static BattleRoyale getInstance() { return instance; }
     public Economy getEconomy() { return econ; }
     public GameManager getGameManager() { return gameManager; }
+    public MiniGameAPI getMiniGameAPI() { return miniGameAPI; } // 可选的 getter
 }

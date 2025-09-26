@@ -2,7 +2,7 @@ name: BattleRoyale
 version: '1.0-SNAPSHOT'
 main: xyz.leafing.battleRoyale.BattleRoyale
 api-version: '1.21'
-depend: [Vault]
+depend: [Vault,MiniGameManager]
 
 commands:
   br:

@@ -26,6 +26,7 @@ dependencies {
 
     // **核心修改：使用全新的、正确的 Multiverse 5.0 坐标**
     compileOnly 'org.mvplugins.multiverse.core:multiverse-core:5.0.0-SNAPSHOT'
+    implementation 'com.github.Roberta001:MiniGameManager:1.0.1-SNAPSHOT'
 }
 
 tasks {
