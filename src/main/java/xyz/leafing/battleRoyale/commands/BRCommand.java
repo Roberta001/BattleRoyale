@@ -8,13 +8,16 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import xyz.leafing.battleRoyale.GameManager;
+import xyz.leafing.battleRoyale.ui.MenuManager;
 
 public class BRCommand implements CommandExecutor {
 
     private final GameManager gameManager;
+    private final MenuManager menuManager; // 新增字段
 
-    public BRCommand(GameManager gameManager) {
+    public BRCommand(GameManager gameManager, MenuManager menuManager) { // 修改构造函数
         this.gameManager = gameManager;
+        this.menuManager = menuManager;
     }
 
     @Override
@@ -32,6 +35,9 @@ public class BRCommand implements CommandExecutor {
         }
 
         switch (args[0].toLowerCase()) {
+            case "menu": // 新增 menu 子命令
+                menuManager.openMainMenu(player);
+                break;
             case "create":
                 if (args.length < 2) {
                     player.sendMessage(Component.text("用法: /br create <金额>", NamedTextColor.RED));

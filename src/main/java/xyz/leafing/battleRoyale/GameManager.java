@@ -543,4 +543,10 @@ public class GameManager {
     public GameState getGameState() { return gameState; }
     private void setGameState(GameState newState) { this.gameState = newState; }
     public boolean isPvpEnabled() { return isPvpEnabled; }
+    public int getParticipantCount() {
+        return participantsOriginalLocations.size();
+    }
+    public int getAlivePlayerCount() {
+        return alivePlayers.size();
+    }
 }

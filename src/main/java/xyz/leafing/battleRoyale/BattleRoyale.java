@@ -5,6 +5,8 @@ import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import xyz.leafing.battleRoyale.commands.BRCommand;
 import xyz.leafing.battleRoyale.listeners.PlayerListener;
+import xyz.leafing.battleRoyale.ui.MenuListener;
+import xyz.leafing.battleRoyale.ui.MenuManager;
 import xyz.leafing.miniGameManager.api.MiniGameAPI; // 导入新的API
 
 import java.util.logging.Logger;
@@ -16,6 +18,8 @@ public final class BattleRoyale extends JavaPlugin {
     private Economy econ = null;
     private MiniGameAPI miniGameAPI = null; // 新增API字段
     private GameManager gameManager;
+
+    private MenuManager menuManager;
 
     @Override
     public void onEnable() {
@@ -38,7 +42,12 @@ public final class BattleRoyale extends JavaPlugin {
         // 将 MiniGameAPI 传入 GameManager
         this.gameManager = new GameManager(this, miniGameAPI);
 
-        getCommand("br").setExecutor(new BRCommand(gameManager));
+        // 初始化 UI 管理器
+        this.menuManager = new MenuManager(gameManager);
+
+        getCommand("br").setExecutor(new BRCommand(gameManager, menuManager)); // 将 menuManager 传入指令处理器
+        getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
+        getServer().getPluginManager().registerEvents(new MenuListener(gameManager, menuManager), this); // 注册 UI 监听器
         getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
         // 不再需要注册 DataRestoreListener
 
