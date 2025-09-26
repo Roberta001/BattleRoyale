@@ -58,6 +58,8 @@ public class GameManager {
         this.miniGameAPI = miniGameAPI; // 注入 API
     }
 
+    // ... (其他方法保持不变) ...
+
     public void createGame(Player initiator, double fee) {
         if (gameState != GameState.IDLE) {
             initiator.sendMessage(Component.text("当前已有游戏正在进行！", NamedTextColor.RED));
@@ -97,18 +99,16 @@ public class GameManager {
             return;
         }
 
-        // 使用 MiniGameAPI 检查玩家是否已在其他游戏中
         if (!miniGameAPI.enterGame(player, plugin)) {
             player.sendMessage(Component.text("你已在另一场游戏中，无法加入！", NamedTextColor.RED));
             return;
         }
 
         plugin.getEconomy().withdrawPlayer(player, entryFee);
-        // 调用 API 保存数据
         if (!miniGameAPI.savePlayerData(player)) {
             player.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
-            plugin.getEconomy().depositPlayer(player, entryFee); // 退款
-            miniGameAPI.leaveGame(player, plugin); // 释放状态
+            plugin.getEconomy().depositPlayer(player, entryFee);
+            miniGameAPI.leaveGame(player, plugin);
             return;
         }
 
@@ -129,35 +129,50 @@ public class GameManager {
     }
 
     public void removePlayer(Player player, boolean refund) {
-        if (!participantsOriginalLocations.containsKey(player.getUniqueId())) return;
+        if (gameState != GameState.LOBBY || !participantsOriginalLocations.containsKey(player.getUniqueId())) return;
 
         if (refund) {
             plugin.getEconomy().depositPlayer(player, entryFee);
             player.sendMessage(Component.text("你已离开大厅，报名费已退还。", NamedTextColor.YELLOW));
         }
 
-        // 调用 API 恢复数据并释放玩家状态
         miniGameAPI.restorePlayerData(player);
         miniGameAPI.leaveGame(player, plugin);
 
-        participantsOriginalLocations.remove(player.getUniqueId());
-        playerScores.remove(player.getUniqueId());
-        killCounts.remove(player.getUniqueId());
+        UUID uuid = player.getUniqueId();
+        participantsOriginalLocations.remove(uuid);
+        playerScores.remove(uuid);
+        killCounts.remove(uuid);
 
         if (bossBar != null) {
             bossBar.removePlayer(player);
         }
 
-        if (gameState == GameState.LOBBY) {
-            broadcastMessage(NamedTextColor.GRAY, player.getName() + " 已离开大厅。");
-            if (participantsOriginalLocations.size() < 2 && lobbyUpdateTask != null) {
-                lobbyUpdateTask.cancel();
-                lobbyUpdateTask = null;
-                if (bossBar != null) bossBar.removeAll();
-                bossBar = null;
-                broadcastMessage(NamedTextColor.YELLOW, "人数不足，游戏开始倒计时已暂停。");
-            }
+        broadcastMessage(NamedTextColor.GRAY, player.getName() + " 已离开大厅。");
+        if (participantsOriginalLocations.size() < 2 && lobbyUpdateTask != null) {
+            lobbyUpdateTask.cancel();
+            lobbyUpdateTask = null;
+            if (bossBar != null) bossBar.removeAll();
+            bossBar = null;
+            broadcastMessage(NamedTextColor.YELLOW, "人数不足，游戏开始倒计时已暂停。");
         }
+    }
+
+    /**
+     * [修复] 处理玩家在游戏中主动退出的逻辑。
+     * 通过将玩家生命值设为0来触发正常的死亡流程，以确保所有逻辑（重生、传送、数据恢复）都能正确执行。
+     * @param player 主动退出的玩家
+     */
+    public void playerQuitInGame(Player player) {
+        // 确保玩家仍然存活，避免重复处理
+        if (!isPlayerAlive(player)) return;
+
+        player.sendMessage(Component.text("你已主动退出游戏。", NamedTextColor.YELLOW));
+
+        // 将玩家生命值设置为0，这将触发 PlayerDeathEvent
+        // 我们的 PlayerListener 会监听到这个事件，并调用 handlePlayerDeath
+        // 从而将“主动退出”统一到标准的“死亡淘汰”流程中
+        player.setHealth(0.0);
     }
 
     private void startLobbyCountdown() {
@@ -230,7 +245,6 @@ public class GameManager {
         alivePlayers.addAll(participantsOriginalLocations.keySet());
         for (Player p : getOnlineParticipants()) {
             worldManager.teleportPlayerToRandomLocation(p, gameWorld);
-            // 调用 API 清空玩家数据
             miniGameAPI.clearPlayerData(p);
             frozenPlayers.add(p.getUniqueId());
             p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
@@ -247,7 +261,7 @@ public class GameManager {
     private void startPreparationCountdown() {
         bossBar.setColor(BarColor.PURPLE);
         bossBar.setStyle(BarStyle.SOLID);
-        bossBar.setVisible(false); // 先隐藏
+        bossBar.setVisible(false);
         AtomicInteger countdown = new AtomicInteger(30);
 
         preparationTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
@@ -317,7 +331,6 @@ public class GameManager {
         }
 
         if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
-            // 更新BossBar标题，只为每个玩家显示自己的分数
             bossBar.getPlayers().forEach(p -> {
                 String scoreSuffix = " | 积分: " + getPlayerScore(p);
                 if (elapsedSeconds < 60) {
@@ -333,7 +346,6 @@ public class GameManager {
                 }
             });
 
-            // 更新BossBar进度和颜色
             if (elapsedSeconds < 60) {
                 bossBar.setProgress((60.0 - elapsedSeconds) / 60.0);
                 bossBar.setColor(BarColor.GREEN);
@@ -368,9 +380,13 @@ public class GameManager {
     }
 
     public void handlePlayerDeath(Player victim, Player killer) {
-        if (!alivePlayers.contains(victim.getUniqueId())) return;
+        if (gameState != GameState.INGAME) return;
+
+        UUID victimUUID = victim.getUniqueId();
+        if (!alivePlayers.contains(victimUUID)) return;
+
         SoundManager.playSound(victim, SoundManager.GameSound.PLAYER_DEATH);
-        alivePlayers.remove(victim.getUniqueId());
+        alivePlayers.remove(victimUUID);
         if (bossBar != null) bossBar.removePlayer(victim);
 
         String deathMessage;
@@ -385,16 +401,18 @@ public class GameManager {
         }
         broadcastMessage(NamedTextColor.AQUA, deathMessage + " [" + alivePlayers.size() + "/" + participantsOriginalLocations.size() + " 剩余]");
 
+        Location originalLocation = participantsOriginalLocations.get(victimUUID);
+
         Bukkit.getScheduler().runTask(plugin, () -> {
             if (victim.isOnline()) {
                 victim.spigot().respawn();
-                Location originalLocation = participantsOriginalLocations.get(victim.getUniqueId());
-                if (originalLocation != null) victim.teleport(originalLocation);
+                if (originalLocation != null) {
+                    victim.teleport(originalLocation);
+                }
 
                 miniGameAPI.restorePlayerData(victim);
-                victim.sendMessage(Component.text("你的游戏前数据已恢复。", NamedTextColor.GREEN));
+                victim.sendMessage(Component.text("你已被淘汰，数据已恢复。", NamedTextColor.GREEN));
             }
-            // 无论在线与否，都必须释放状态
             miniGameAPI.leaveGame(victim, plugin);
         });
 
@@ -404,12 +422,13 @@ public class GameManager {
     }
 
     private void endGame() {
+        if (gameState != GameState.INGAME) return;
+
         if (gameUpdateTask != null) gameUpdateTask.cancel();
         setGameState(GameState.CLEANUP);
 
-        // 最终生存积分结算
         long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
-        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS != 0) { // 补上最后一次
+        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS != 0) {
             for (UUID uuid : alivePlayers) {
                 playerScores.compute(uuid, (key, oldVal) -> (oldVal == null) ? SURVIVAL_POINTS : oldVal + SURVIVAL_POINTS);
             }
@@ -459,7 +478,6 @@ public class GameManager {
     }
 
     private void endGameCleanup() {
-        // 恢复胜利者数据 (其他玩家已在死亡时恢复)
         for (UUID uuid : alivePlayers) {
             Player p = Bukkit.getPlayer(uuid);
             if (p != null) {
@@ -469,7 +487,7 @@ public class GameManager {
                 miniGameAPI.leaveGame(p, plugin);
             }
         }
-        alivePlayers.clear(); // 清空
+        alivePlayers.clear();
 
         if (bossBar != null) bossBar.removeAll();
         bossBar = null;
@@ -478,7 +496,6 @@ public class GameManager {
         if (gameUpdateTask != null) gameUpdateTask.cancel();
         if (preparationTask != null) preparationTask.cancel();
 
-        // 重置所有状态
         participantsOriginalLocations.clear();
         killCounts.clear();
         frozenPlayers.clear();
@@ -519,8 +536,6 @@ public class GameManager {
                 .collect(Collectors.toList());
     }
 
-
-
     private int getPlayerScore(Player player) {
         if (player == null) return 0;
         return playerScores.getOrDefault(player.getUniqueId(), 0);
@@ -539,6 +554,16 @@ public class GameManager {
 
     public boolean isPlayerInGame(Player player) { return participantsOriginalLocations.containsKey(player.getUniqueId()); }
     public boolean isPlayerFrozen(Player player) { return frozenPlayers.contains(player.getUniqueId()); }
+
+    public void unfreezePlayer(Player player) {
+        frozenPlayers.remove(player.getUniqueId());
+    }
+
+    public boolean isPlayerAlive(Player player) {
+        if (player == null) return false;
+        return alivePlayers.contains(player.getUniqueId());
+    }
+
     public String getGameWorldName() { return gameWorldName; }
     public GameState getGameState() { return gameState; }
     private void setGameState(GameState newState) { this.gameState = newState; }

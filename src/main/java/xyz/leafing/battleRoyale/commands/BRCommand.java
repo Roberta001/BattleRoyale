@@ -9,13 +9,14 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import xyz.leafing.battleRoyale.GameManager;
 import xyz.leafing.battleRoyale.ui.MenuManager;
+import xyz.leafing.battleRoyale.GameState;
 
 public class BRCommand implements CommandExecutor {
 
     private final GameManager gameManager;
-    private final MenuManager menuManager; // 新增字段
+    private final MenuManager menuManager;
 
-    public BRCommand(GameManager gameManager, MenuManager menuManager) { // 修改构造函数
+    public BRCommand(GameManager gameManager, MenuManager menuManager) {
         this.gameManager = gameManager;
         this.menuManager = menuManager;
     }
@@ -30,12 +31,12 @@ public class BRCommand implements CommandExecutor {
         Player player = (Player) sender;
 
         if (args.length == 0) {
-            sendHelp(player);
+            menuManager.openMainMenu(player); // 默认打开菜单
             return true;
         }
 
         switch (args[0].toLowerCase()) {
-            case "menu": // 新增 menu 子命令
+            case "menu":
                 menuManager.openMainMenu(player);
                 break;
             case "create":
@@ -58,16 +59,35 @@ public class BRCommand implements CommandExecutor {
                 gameManager.addPlayer(player);
                 break;
             case "leave":
-                gameManager.removePlayer(player, true);
+                // [修复] 细化 'leave' 命令的逻辑，根据游戏状态和玩家状态执行不同操作
+                GameState state = gameManager.getGameState();
+                if (state == GameState.LOBBY) {
+                    if (gameManager.isPlayerInGame(player)) {
+                        // 玩家在LOBBY中，正常退出
+                        gameManager.removePlayer(player, true);
+                    } else {
+                        player.sendMessage(Component.text("你当前不在游戏大厅中。", NamedTextColor.RED));
+                    }
+                } else if (state == GameState.INGAME || state == GameState.PREPARING) {
+                    if (gameManager.isPlayerAlive(player)) {
+                        // 玩家在游戏中且存活，视为主动淘汰 (触发死亡)
+                        gameManager.playerQuitInGame(player);
+                    } else if (gameManager.isPlayerInGame(player)) {
+                        // 玩家曾是参与者但已被淘汰
+                        player.sendMessage(Component.text("你已经被淘汰，无需离开。", NamedTextColor.YELLOW));
+                    } else {
+                        // 玩家根本没有参与这场游戏
+                        player.sendMessage(Component.text("你没有参与当前的游戏。", NamedTextColor.RED));
+                    }
+                } else {
+                    player.sendMessage(Component.text("当前没有可以离开的游戏。", NamedTextColor.RED));
+                }
                 break;
-            // MODIFIED: 增加新的子命令处理
             case "forcestart":
-                // 1. 检查权限
                 if (!player.hasPermission("br.admin")) {
                     player.sendMessage(Component.text("你没有权限执行此命令。", NamedTextColor.RED));
                     return true;
                 }
-                // 2. 调用GameManager中的新方法
                 gameManager.forceStartLobby(player);
                 break;
             default:
@@ -79,10 +99,10 @@ public class BRCommand implements CommandExecutor {
 
     private void sendHelp(Player player) {
         player.sendMessage(Component.text("--- 大逃杀 帮助 ---", NamedTextColor.GOLD));
+        player.sendMessage(Component.text("/br menu", NamedTextColor.AQUA).append(Component.text(" - 打开游戏菜单。", NamedTextColor.GRAY)));
         player.sendMessage(Component.text("/br create <金额>", NamedTextColor.AQUA).append(Component.text(" - 开始一场新游戏。", NamedTextColor.GRAY)));
         player.sendMessage(Component.text("/br join", NamedTextColor.AQUA).append(Component.text(" - 加入当前游戏。", NamedTextColor.GRAY)));
-        player.sendMessage(Component.text("/br leave", NamedTextColor.AQUA).append(Component.text(" - 离开游戏大厅。", NamedTextColor.GRAY)));
-        // MODIFIED: 在帮助信息中增加新命令的说明
+        player.sendMessage(Component.text("/br leave", NamedTextColor.AQUA).append(Component.text(" - 离开游戏或大厅。", NamedTextColor.GRAY)));
         if (player.hasPermission("br.admin")) {
             player.sendMessage(Component.text("/br forcestart", NamedTextColor.RED).append(Component.text(" - (管理员) 强制开始游戏。", NamedTextColor.GRAY)));
         }

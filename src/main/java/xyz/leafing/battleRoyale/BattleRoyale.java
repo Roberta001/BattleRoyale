@@ -48,8 +48,9 @@ public final class BattleRoyale extends JavaPlugin {
         getCommand("br").setExecutor(new BRCommand(gameManager, menuManager)); // 将 menuManager 传入指令处理器
         getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
         getServer().getPluginManager().registerEvents(new MenuListener(gameManager, menuManager), this); // 注册 UI 监听器
-        getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
-        // 不再需要注册 DataRestoreListener
+
+        // [修复] 移除了重复的 PlayerListener 注册，避免事件被触发两次
+        // getServer().getPluginManager().registerEvents(new PlayerListener(gameManager), this);
 
         getLogger().info("BattleRoyale 插件已成功加载并连接到 MiniGameManager 服务!");
     }

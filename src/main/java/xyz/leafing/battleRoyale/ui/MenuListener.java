@@ -26,19 +26,16 @@ public class MenuListener implements Listener {
         if (!(event.getWhoClicked() instanceof Player)) return;
         Player player = (Player) event.getWhoClicked();
 
-        // 检查是否是我们的UI
         String title = event.getView().getTitle();
         if (!title.equals(MenuManager.MAIN_MENU_TITLE) && !title.equals(MenuManager.ADMIN_MENU_TITLE)) {
             return;
         }
 
-        // 阻止玩家从UI中拿出物品
         event.setCancelled(true);
 
         ItemStack clickedItem = event.getCurrentItem();
         if (clickedItem == null || clickedItem.getType() == Material.AIR) return;
 
-        // 根据标题分发事件
         if (title.equals(MenuManager.MAIN_MENU_TITLE)) {
             handleMainMenuClick(player, clickedItem);
         } else if (title.equals(MenuManager.ADMIN_MENU_TITLE)) {
@@ -48,24 +45,31 @@ public class MenuListener implements Listener {
 
     private void handleMainMenuClick(Player player, ItemStack item) {
         switch (item.getType()) {
-            case EMERALD_BLOCK: // 创建游戏
+            case EMERALD_BLOCK:
                 if (gameManager.getGameState() == GameState.IDLE) {
                     player.closeInventory();
-                    player.sendMessage(Component.text("请在聊天框中输入报名费金额 (例如: 100.5)", NamedTextColor.GREEN));
-                    // 这里需要一个机制来监听玩家的下一次聊天输入
-                    // 为了简化，我们暂时只提示，让玩家手动输入 /br create <金额>
-                    // 一个更高级的实现会使用 Conversation API 或一个临时的 Map 来捕获输入
+                    player.sendMessage(Component.text("请在聊天框中输入报名费金额, 例如: /br create 100", NamedTextColor.GREEN));
                 }
                 break;
-            case DIAMOND_BLOCK: // 加入游戏
+            case DIAMOND_BLOCK:
                 player.closeInventory();
                 gameManager.addPlayer(player);
                 break;
-            case BARRIER: // 离开游戏
+            case BARRIER: // 离开游戏按钮
                 player.closeInventory();
-                gameManager.removePlayer(player, true);
+                // [修复] 细化 '离开' 按钮的逻辑，使其和命令一致
+                GameState state = gameManager.getGameState();
+                if (state == GameState.LOBBY) {
+                    // 菜单UI保证了此时玩家肯定在游戏里
+                    gameManager.removePlayer(player, true);
+                } else if (state == GameState.INGAME || state == GameState.PREPARING) {
+                    // 菜单UI理论上不会给已淘汰的玩家显示这个按钮，但为了安全还是检查
+                    if (gameManager.isPlayerAlive(player)) {
+                        gameManager.playerQuitInGame(player);
+                    }
+                }
                 break;
-            case COMMAND_BLOCK: // 打开管理员面板
+            case COMMAND_BLOCK:
                 if (player.hasPermission("br.admin")) {
                     menuManager.openAdminMenu(player);
                 }
@@ -77,13 +81,13 @@ public class MenuListener implements Listener {
 
     private void handleAdminMenuClick(Player player, ItemStack item) {
         switch (item.getType()) {
-            case LIME_WOOL: // 强制开始
+            case LIME_WOOL:
                 if (gameManager.getGameState() == GameState.LOBBY) {
                     player.closeInventory();
                     gameManager.forceStartLobby(player);
                 }
                 break;
-            case ARROW: // 返回主菜单
+            case ARROW:
                 menuManager.openMainMenu(player);
                 break;
             default:
