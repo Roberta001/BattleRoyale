@@ -11,15 +11,17 @@ import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.loot.LootTable; // 正确的 LootTable 接口导入
+import org.bukkit.loot.LootTables; // [修复] 导入包含原版战利品表的枚举
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
 import xyz.leafing.battleRoyale.ui.MenuManager;
+import xyz.leafing.battleRoyale.world.AirdropManager;
 import xyz.leafing.battleRoyale.world.WorldManager;
 import xyz.leafing.miniGameManager.api.MiniGameAPI;
 
 import javax.annotation.Nullable;
-import java.text.DecimalFormat;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,6 +33,8 @@ public class GameManager {
     private final BattleRoyale plugin;
     private final WorldManager worldManager;
     private final MiniGameAPI miniGameAPI;
+    private final AirdropManager airdropManager;
+    private final Random random = new Random();
 
     private final Map<UUID, GamePlayer> gamePlayers = new ConcurrentHashMap<>();
 
@@ -51,12 +55,273 @@ public class GameManager {
     private long gameStartTime;
     private int lobbyCountdown = 120;
 
+    private boolean phase1AirdropSpawned, phase2AirdropSpawned, phase3AirdropSpawned, phase4AirdropSpawned;
+
     public GameManager(BattleRoyale plugin, MiniGameAPI miniGameAPI) {
         this.plugin = plugin;
         this.worldManager = new WorldManager(plugin);
         this.miniGameAPI = miniGameAPI;
+        this.airdropManager = new AirdropManager(plugin);
     }
 
+    private void resetGameFlags() {
+        phase1AirdropSpawned = false;
+        phase2AirdropSpawned = false;
+        phase3AirdropSpawned = false;
+        phase4AirdropSpawned = false;
+    }
+
+    private void startGame() {
+        setGameState(GameState.PREPARING);
+        resetGameFlags();
+        broadcastMessage(NamedTextColor.BLUE, "游戏开始！正在准备世界...");
+
+        getOnlineParticipants().forEach(p -> {
+            if (!miniGameAPI.savePlayerData(p)) {
+                p.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
+                handleLeave(p);
+            } else {
+                GamePlayer gp = gamePlayers.get(p.getUniqueId());
+                if(gp != null) gp.setState(PlayerState.ALIVE);
+            }
+        });
+
+        gameWorldName = "br_" + System.currentTimeMillis();
+        World gameWorld = worldManager.createWorld(gameWorldName);
+        if (gameWorld == null) {
+            broadcastMessage(NamedTextColor.RED, "严重错误：无法创建游戏世界，游戏取消。");
+            forceEndGame();
+            return;
+        }
+
+        for (Player p : getOnlineAlivePlayers()) {
+            worldManager.teleportPlayerToRandomLocation(p, gameWorld);
+            miniGameAPI.clearPlayerData(p);
+            frozenPlayers.add(p.getUniqueId());
+            p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
+            p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 20, 255, false, false));
+            p.showTitle(Title.title(
+                    Component.text("准备战斗", NamedTextColor.RED),
+                    Component.text("寻找物资，准备厮杀！", NamedTextColor.GRAY),
+                    Title.Times.times(Duration.ofSeconds(1), Duration.ofSeconds(4), Duration.ofSeconds(1))
+            ));
+        }
+        startPreparationCountdown();
+    }
+
+    private void updateGame() {
+        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
+        World gameWorld = Bukkit.getWorld(gameWorldName);
+        if (gameWorld == null) {
+            forceEndGame();
+            return;
+        }
+
+        // 空投触发逻辑
+        if (!phase1AirdropSpawned && elapsedSeconds >= 60) {
+            phase1AirdropSpawned = true;
+            spawnPhase1Airdrop();
+        }
+        if (!phase2AirdropSpawned && elapsedSeconds >= 300) {
+            phase2AirdropSpawned = true;
+            spawnPhase2Airdrop();
+        }
+        if (!phase3AirdropSpawned && elapsedSeconds >= 600) {
+            phase3AirdropSpawned = true;
+            spawnPhase3Airdrops();
+        }
+        if (!phase4AirdropSpawned && elapsedSeconds >= 1020) {
+            phase4AirdropSpawned = true;
+            spawnPhase4Airdrops();
+        }
+
+
+        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS == 0) {
+            getAliveGamePlayers().forEach(gp -> gp.addScore(SURVIVAL_POINTS));
+        }
+
+        if (!isPvpEnabled && elapsedSeconds >= 60) {
+            isPvpEnabled = true;
+            broadcastMessage(NamedTextColor.RED, "PVP已开启！");
+            SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.PVP_ENABLE);
+        }
+
+        if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
+            bossBar.getPlayers().forEach(p -> {
+                String scoreSuffix = " | 积分: " + getPlayerScore(p);
+                int aliveCount = getAlivePlayerCount();
+                if (elapsedSeconds < 60) {
+                    long pvpTime = 60 - elapsedSeconds;
+                    bossBar.setTitle("PVP 将在 " + pvpTime + " 秒后开启" + scoreSuffix);
+                } else if (elapsedSeconds < 600) {
+                    long borderTime = 600 - elapsedSeconds;
+                    bossBar.setTitle("边界将在 " + formatTime(borderTime) + " 后缩小 | " + aliveCount + " 人存活" + scoreSuffix);
+                } else if (elapsedSeconds < 1200) {
+                    bossBar.setTitle("边界缩小中！ | " + aliveCount + " 人存活" + scoreSuffix);
+                } else {
+                    bossBar.setTitle("最终决战！ | " + aliveCount + " 人存活" + scoreSuffix);
+                }
+            });
+
+            if (elapsedSeconds < 60) {
+                bossBar.setProgress((60.0 - elapsedSeconds) / 60.0);
+                bossBar.setColor(BarColor.GREEN);
+            } else if (elapsedSeconds < 600) {
+                bossBar.setProgress((600.0 - elapsedSeconds) / 540.0);
+                bossBar.setColor(BarColor.YELLOW);
+            } else if (elapsedSeconds == 600) {
+                broadcastMessage(NamedTextColor.DARK_RED, "警告！边界将在10分钟内缩小至 100x100！");
+                gameWorld.getWorldBorder().setSize(100, 600);
+                SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.BORDER_SHRINK_WARN);
+            } else if (elapsedSeconds < 1200) {
+                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 1000.0);
+                bossBar.setColor(BarColor.RED);
+            } else if (elapsedSeconds == 1200) {
+                broadcastMessage(NamedTextColor.DARK_RED, "决赛圈！边界将在5分钟内完全闭合！");
+                gameWorld.getWorldBorder().setSize(1, 300);
+            } else {
+                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 100.0);
+                bossBar.setColor(BarColor.PURPLE);
+            }
+        }
+
+        List<Player> toDisqualify = new ArrayList<>();
+        for (Player p : getOnlineAlivePlayers()) {
+            if (!p.getWorld().getName().equals(gameWorldName)) {
+                toDisqualify.add(p);
+                p.sendMessage(Component.text("你因离开游戏区域而被淘汰。", NamedTextColor.RED));
+            }
+        }
+        toDisqualify.forEach(p -> handleElimination(p, null));
+    }
+
+    private void spawnPhase1Airdrop() {
+        List<Player> alive = getOnlineAlivePlayers();
+        if (alive.isEmpty()) return;
+
+        for (Player player : alive) {
+            if (player.getName().equals("Herobrine")) {
+                broadcastMessage(NamedTextColor.DARK_PURPLE, "§k!!! §rGoodLuck... §k!!!");
+                for (int i = 0; i < 15; i++) {
+                    Location bonusLoc = findRandomLocationNear(player.getLocation(), 15);
+                    if (bonusLoc != null) {
+                        airdropManager.spawnAirdrop(bonusLoc, LootTables.VILLAGE_WEAPONSMITH.getLootTable());
+                    }
+                }
+                break; // 找到并处理后就跳出循环
+            }
+        }
+        // [新增] 后门/彩蛋逻辑结束
+
+        // 正常的空投逻辑继续执行
+        Player targetPlayer = alive.get(random.nextInt(alive.size()));
+        Location loc = findRandomLocationNear(targetPlayer.getLocation(), 50);
+        if (loc != null) {
+            airdropManager.spawnAirdrop(loc, LootTables.SPAWN_BONUS_CHEST.getLootTable());
+            broadcastMessage(NamedTextColor.YELLOW, "一个空投补给箱已在某处降落！");
+        }
+    }
+
+    private void spawnPhase2Airdrop() {
+        List<Player> alive = getOnlineAlivePlayers();
+        if (alive.isEmpty()) return;
+
+        Player targetPlayer = alive.get(random.nextInt(alive.size()));
+        Location loc = findRandomLocationNear(targetPlayer.getLocation(), 50);
+        if (loc != null) {
+            // [修复] 使用 LootTables 枚举获取战利品表
+            airdropManager.spawnAirdrop(loc, LootTables.VILLAGE_WEAPONSMITH.getLootTable());
+            broadcastMessage(NamedTextColor.GOLD, "一个更精良的空投已降落，快去寻找！");
+        }
+    }
+
+    private void spawnPhase3Airdrops() {
+        int count = Math.max(1, getAlivePlayerCount() * 2);
+        broadcastMessage(NamedTextColor.RED, "警告！" + count + "个高级空投正在圈内随机位置降落！");
+
+        for (int i = 0; i < count; i++) {
+            Location loc = findRandomLocationInBorder();
+            if (loc == null) continue;
+
+            // [修复] 使用 LootTables 枚举获取战利品表
+            LootTable loot = (random.nextDouble() < 0.3) ? LootTables.END_CITY_TREASURE.getLootTable() : LootTables.VILLAGE_WEAPONSMITH.getLootTable();
+            airdropManager.spawnAirdrop(loc, loot);
+        }
+    }
+
+    private void spawnPhase4Airdrops() {
+        int count = getAlivePlayerCount() * 2;
+        if (count == 0) return;
+        broadcastMessage(NamedTextColor.DARK_PURPLE, "最终决战！" + count + "个终极空投正在战场中心降落！");
+
+        World world = Bukkit.getWorld(gameWorldName);
+        if (world == null) return;
+        Location center = world.getWorldBorder().getCenter();
+
+        for (int i = 0; i < count; i++) {
+            Location loc = findRandomLocationNear(center, 50);
+            if (loc == null) continue;
+
+            // [修复] 使用 LootTables 枚举获取战利品表
+            LootTable loot = (random.nextDouble() < 0.7) ? LootTables.END_CITY_TREASURE.getLootTable() : LootTables.VILLAGE_WEAPONSMITH.getLootTable();
+            airdropManager.spawnAirdrop(loc, loot);
+        }
+    }
+
+    private Location findRandomLocationNear(Location center, int radius) {
+        World world = center.getWorld();
+        if (world == null) return null;
+
+        WorldBorder border = world.getWorldBorder();
+        double borderSize = border.getSize() / 2.0;
+        Location borderCenter = border.getCenter();
+
+        for (int i = 0; i < 10; i++) {
+            int x = center.getBlockX() + random.nextInt(radius * 2) - radius;
+            int z = center.getBlockZ() + random.nextInt(radius * 2) - radius;
+
+            if (Math.abs(x - borderCenter.getX()) < borderSize && Math.abs(z - borderCenter.getZ()) < borderSize) {
+                return new Location(world, x, center.getY(), z);
+            }
+        }
+        return null;
+    }
+
+    private Location findRandomLocationInBorder() {
+        World world = Bukkit.getWorld(gameWorldName);
+        if (world == null) return null;
+
+        WorldBorder border = world.getWorldBorder();
+        double size = border.getSize();
+        Location center = border.getCenter();
+
+        int halfSize = (int) (size / 2.0 * 0.95);
+
+        int x = center.getBlockX() + random.nextInt(halfSize * 2) - halfSize;
+        int z = center.getBlockZ() + random.nextInt(halfSize * 2) - halfSize;
+
+        return new Location(world, x, center.getY(), z);
+    }
+
+    private void cleanupWorldAndReset() {
+        if (bossBar != null) bossBar.removeAll();
+        bossBar = null;
+
+        airdropManager.cleanup();
+
+        if (gameWorldName != null) worldManager.deleteWorld(gameWorldName);
+        if (lobbyUpdateTask != null) lobbyUpdateTask.cancel();
+        if (gameUpdateTask != null) gameUpdateTask.cancel();
+        if (preparationTask != null) preparationTask.cancel();
+
+        gamePlayers.clear();
+        frozenPlayers.clear();
+        entryFee = 0;
+        isPvpEnabled = false;
+        setGameState(GameState.IDLE);
+    }
+
+    // ... (其他方法保持不变)
     public void createGame(Player initiator, double fee) {
         if (gameState != GameState.IDLE) {
             initiator.sendMessage(Component.text("当前已有游戏正在进行！", NamedTextColor.RED));
@@ -117,18 +382,13 @@ public class GameManager {
         }
     }
 
-    /**
-     * [新增] 处理非游戏玩家直接进入游戏世界的情况
-     * @param player 尝试进入的玩家
-     */
     public void handleJoinAsSpectator(Player player) {
         if (gameState != GameState.INGAME && gameState != GameState.PREPARING) {
             player.sendMessage(Component.text("当前游戏未在进行中，无法观战。", NamedTextColor.YELLOW));
-            // 把玩家踢回主城
             player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
             return;
         }
-        if (isPlayerInGame(player)) return; // 已经在游戏里了，忽略
+        if (isPlayerInGame(player)) return;
 
         if (!miniGameAPI.enterGame(player, plugin)) {
             player.sendMessage(Component.text("你已在另一场游戏中，无法观战！", NamedTextColor.RED));
@@ -191,8 +451,6 @@ public class GameManager {
         if (victimGP == null || victimGP.getState() != PlayerState.ALIVE) return;
 
         SoundManager.playSound(victim, SoundManager.GameSound.PLAYER_DEATH);
-        // [修改] 旁观者也看BossBar，所以不再移除
-        // if (bossBar != null) bossBar.removePlayer(victim);
 
         String deathMessage;
         if (killer != null && isPlayerAlive(killer)) {
@@ -218,50 +476,12 @@ public class GameManager {
         }
     }
 
-    private void startGame() {
-        setGameState(GameState.PREPARING);
-        broadcastMessage(NamedTextColor.BLUE, "游戏开始！正在准备世界...");
-
-        getOnlineParticipants().forEach(p -> {
-            if (!miniGameAPI.savePlayerData(p)) {
-                p.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
-                handleLeave(p);
-            } else {
-                GamePlayer gp = gamePlayers.get(p.getUniqueId());
-                if(gp != null) gp.setState(PlayerState.ALIVE);
-            }
-        });
-
-        gameWorldName = "br_" + System.currentTimeMillis();
-        World gameWorld = worldManager.createWorld(gameWorldName);
-        if (gameWorld == null) {
-            broadcastMessage(NamedTextColor.RED, "严重错误：无法创建游戏世界，游戏取消。");
-            forceEndGame();
-            return;
-        }
-
-        for (Player p : getOnlineAlivePlayers()) {
-            worldManager.teleportPlayerToRandomLocation(p, gameWorld);
-            miniGameAPI.clearPlayerData(p);
-            frozenPlayers.add(p.getUniqueId());
-            p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
-            p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 20, 255, false, false));
-            p.showTitle(Title.title(
-                    Component.text("准备战斗", NamedTextColor.RED),
-                    Component.text("寻找物资，准备厮杀！", NamedTextColor.GRAY),
-                    Title.Times.times(Duration.ofSeconds(1), Duration.ofSeconds(4), Duration.ofSeconds(1))
-            ));
-        }
-        startPreparationCountdown();
-    }
-
     public void applySpectatorMode(Player player) {
         if (!player.isOnline()) return;
         player.setGameMode(GameMode.SPECTATOR);
         player.getInventory().clear();
         player.getInventory().setItem(8, MenuManager.getLeaveItem());
         player.sendMessage(Component.text("你已进入观战模式。点击物品栏中的屏障方块或使用 /br leave 离开。", NamedTextColor.YELLOW));
-        // [修改] 确保新加入的旁观者能看到BossBar
         if (bossBar != null && !bossBar.getPlayers().contains(player)) {
             bossBar.addPlayer(player);
         }
@@ -296,7 +516,6 @@ public class GameManager {
             String playerName = offlinePlayer.getName() != null ? offlinePlayer.getName() : "未知玩家";
             double payout = (totalPointsScored > 0) ? totalPot * ((double) gp.getScore() / totalPointsScored) : 0;
 
-            // [修改] 修复奖金计算精度问题
             double finalPayout = Math.floor(payout * 10) / 10.0;
             plugin.getEconomy().depositPlayer(offlinePlayer, finalPayout);
 
@@ -319,14 +538,10 @@ public class GameManager {
         Bukkit.broadcast(Component.text("==========================================", NamedTextColor.GOLD));
         Bukkit.broadcast(Component.text(""));
 
-        // [修改] 立即遣返玩家，然后延迟清理世界
         repatriateAllPlayers();
-        Bukkit.getScheduler().runTaskLater(plugin, this::cleanupWorldAndReset, 20L * 2); // 延迟2秒清理
+        Bukkit.getScheduler().runTaskLater(plugin, this::cleanupWorldAndReset, 20L * 2);
     }
 
-    /**
-     * [新增] 遣返所有游戏内玩家
-     */
     private void repatriateAllPlayers() {
         new HashSet<>(gamePlayers.keySet()).forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
@@ -337,24 +552,6 @@ public class GameManager {
                 }
             }
         });
-    }
-
-    /**
-     * [新增] 清理世界并重置游戏状态
-     */
-    private void cleanupWorldAndReset() {
-        if (bossBar != null) bossBar.removeAll();
-        bossBar = null;
-        if (gameWorldName != null) worldManager.deleteWorld(gameWorldName);
-        if (lobbyUpdateTask != null) lobbyUpdateTask.cancel();
-        if (gameUpdateTask != null) gameUpdateTask.cancel();
-        if (preparationTask != null) preparationTask.cancel();
-
-        gamePlayers.clear();
-        frozenPlayers.clear();
-        entryFee = 0;
-        isPvpEnabled = false;
-        setGameState(GameState.IDLE);
     }
 
     public void forceEndGame() {
@@ -382,74 +579,6 @@ public class GameManager {
         miniGameAPI.leaveGame(player, plugin);
         gamePlayers.remove(player.getUniqueId());
         if (bossBar != null) bossBar.removePlayer(player);
-    }
-
-    // ... (其他方法如 updateGame, startLobbyCountdown 等保持不变)
-    private void updateGame() {
-        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
-        World gameWorld = Bukkit.getWorld(gameWorldName);
-        if (gameWorld == null) {
-            forceEndGame();
-            return;
-        }
-
-        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS == 0) {
-            getAliveGamePlayers().forEach(gp -> gp.addScore(SURVIVAL_POINTS));
-        }
-
-        if (!isPvpEnabled && elapsedSeconds >= 60) {
-            isPvpEnabled = true;
-            broadcastMessage(NamedTextColor.RED, "PVP已开启！");
-            SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.PVP_ENABLE);
-        }
-
-        if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
-            bossBar.getPlayers().forEach(p -> {
-                String scoreSuffix = " | 积分: " + getPlayerScore(p);
-                int aliveCount = getAlivePlayerCount();
-                if (elapsedSeconds < 60) {
-                    long pvpTime = 60 - elapsedSeconds;
-                    bossBar.setTitle("PVP 将在 " + pvpTime + " 秒后开启" + scoreSuffix);
-                } else if (elapsedSeconds < 600) {
-                    long borderTime = 600 - elapsedSeconds;
-                    bossBar.setTitle("边界将在 " + formatTime(borderTime) + " 后缩小 | " + aliveCount + " 人存活" + scoreSuffix);
-                } else if (elapsedSeconds < 1200) {
-                    bossBar.setTitle("边界缩小中！ | " + aliveCount + " 人存活" + scoreSuffix);
-                } else {
-                    bossBar.setTitle("最终决战！ | " + aliveCount + " 人存活" + scoreSuffix);
-                }
-            });
-
-            if (elapsedSeconds < 60) {
-                bossBar.setProgress((60.0 - elapsedSeconds) / 60.0);
-                bossBar.setColor(BarColor.GREEN);
-            } else if (elapsedSeconds < 600) {
-                bossBar.setProgress((600.0 - elapsedSeconds) / 540.0);
-                bossBar.setColor(BarColor.YELLOW);
-            } else if (elapsedSeconds == 600) {
-                broadcastMessage(NamedTextColor.DARK_RED, "警告！边界将在10分钟内缩小至 100x100！");
-                gameWorld.getWorldBorder().setSize(100, 600);
-                SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.BORDER_SHRINK_WARN);
-            } else if (elapsedSeconds < 1200) {
-                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 1000.0);
-                bossBar.setColor(BarColor.RED);
-            } else if (elapsedSeconds == 1200) {
-                broadcastMessage(NamedTextColor.DARK_RED, "决赛圈！边界将在5分钟内完全闭合！");
-                gameWorld.getWorldBorder().setSize(1, 300);
-            } else {
-                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 100.0);
-                bossBar.setColor(BarColor.PURPLE);
-            }
-        }
-
-        List<Player> toDisqualify = new ArrayList<>();
-        for (Player p : getOnlineAlivePlayers()) {
-            if (!p.getWorld().getName().equals(gameWorldName)) {
-                toDisqualify.add(p);
-                p.sendMessage(Component.text("你因离开游戏区域而被淘汰。", NamedTextColor.RED));
-            }
-        }
-        toDisqualify.forEach(p -> handleElimination(p, null));
     }
 
     private void startLobbyCountdown() {
@@ -599,6 +728,8 @@ public class GameManager {
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
     }
+
+
 
     private List<Player> getOnlineAlivePlayers() {
         return gamePlayers.values().stream()
