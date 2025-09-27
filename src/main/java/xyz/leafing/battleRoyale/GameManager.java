@@ -5,10 +5,7 @@ import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
-import org.bukkit.Bukkit;
-import org.bukkit.Location;
-import org.bukkit.OfflinePlayer;
-import org.bukkit.World;
+import org.bukkit.*;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
@@ -17,11 +14,14 @@ import org.bukkit.entity.Player;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
+import xyz.leafing.battleRoyale.ui.MenuManager;
 import xyz.leafing.battleRoyale.world.WorldManager;
-import xyz.leafing.miniGameManager.api.MiniGameAPI; // 导入 API
+import xyz.leafing.miniGameManager.api.MiniGameAPI;
 
+import javax.annotation.Nullable;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -29,16 +29,15 @@ public class GameManager {
 
     private final BattleRoyale plugin;
     private final WorldManager worldManager;
-    private final MiniGameAPI miniGameAPI; // 使用 API 替代 PlayerDataManager
+    private final MiniGameAPI miniGameAPI;
+
+    // [重构] 统一的玩家数据管理器
+    private final Map<UUID, GamePlayer> gamePlayers = new ConcurrentHashMap<>();
 
     private GameState gameState = GameState.IDLE;
-    private final Map<UUID, Location> participantsOriginalLocations = new HashMap<>();
-    private final Set<UUID> alivePlayers = new HashSet<>();
-    private final Map<UUID, Integer> killCounts = new HashMap<>();
     private double entryFee = 0;
     private String gameWorldName = null;
 
-    private final Map<UUID, Integer> playerScores = new HashMap<>();
     private static final int KILL_POINTS = 200;
     private static final int SURVIVAL_POINT_INTERVAL_SECONDS = 3;
     private static final int SURVIVAL_POINTS = 1;
@@ -55,10 +54,8 @@ public class GameManager {
     public GameManager(BattleRoyale plugin, MiniGameAPI miniGameAPI) {
         this.plugin = plugin;
         this.worldManager = new WorldManager(plugin);
-        this.miniGameAPI = miniGameAPI; // 注入 API
+        this.miniGameAPI = miniGameAPI;
     }
-
-    // ... (其他方法保持不变) ...
 
     public void createGame(Player initiator, double fee) {
         if (gameState != GameState.IDLE) {
@@ -72,7 +69,7 @@ public class GameManager {
 
         this.entryFee = fee;
         setGameState(GameState.LOBBY);
-        addPlayer(initiator); // 创建者自动加入
+        handleJoinLobby(initiator); // 创建者自动加入
 
         Component joinMessage = Component.text("[点击加入]", NamedTextColor.GREEN, TextDecoration.BOLD)
                 .clickEvent(ClickEvent.runCommand("/br join"));
@@ -85,12 +82,12 @@ public class GameManager {
         Bukkit.broadcast(broadcastMessage);
     }
 
-    public void addPlayer(Player player) {
+    public void handleJoinLobby(Player player) {
         if (gameState != GameState.LOBBY) {
             player.sendMessage(Component.text("现在无法加入游戏。", NamedTextColor.RED));
             return;
         }
-        if (participantsOriginalLocations.containsKey(player.getUniqueId())) {
+        if (isPlayerInGame(player)) {
             player.sendMessage(Component.text("你已经在大厅中了。", NamedTextColor.YELLOW));
             return;
         }
@@ -98,81 +95,337 @@ public class GameManager {
             player.sendMessage(Component.text("你的余额不足以支付 " + entryFee + " 的报名费。", NamedTextColor.RED));
             return;
         }
-
         if (!miniGameAPI.enterGame(player, plugin)) {
             player.sendMessage(Component.text("你已在另一场游戏中，无法加入！", NamedTextColor.RED));
             return;
         }
 
         plugin.getEconomy().withdrawPlayer(player, entryFee);
-        if (!miniGameAPI.savePlayerData(player)) {
-            player.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
-            plugin.getEconomy().depositPlayer(player, entryFee);
-            miniGameAPI.leaveGame(player, plugin);
-            return;
-        }
 
-        participantsOriginalLocations.put(player.getUniqueId(), player.getLocation());
-        killCounts.put(player.getUniqueId(), 0);
-        playerScores.put(player.getUniqueId(), 0);
+        GamePlayer gamePlayer = new GamePlayer(player.getUniqueId(), player.getLocation());
+        gamePlayers.put(player.getUniqueId(), gamePlayer);
 
-        broadcastMessage(NamedTextColor.GREEN, player.getName() + " 已加入战斗！ (" + participantsOriginalLocations.size() + " 人)");
+        broadcastMessage(NamedTextColor.GREEN, player.getName() + " 已加入战斗！ (" + getParticipantCount() + " 人)");
         SoundManager.playSound(player, SoundManager.GameSound.JOIN_LOBBY);
 
         if (bossBar != null) {
             bossBar.addPlayer(player);
         }
 
-        if (participantsOriginalLocations.size() >= 2 && lobbyUpdateTask == null) {
+        if (getParticipantCount() >= 2 && lobbyUpdateTask == null) {
             startLobbyCountdown();
         }
     }
 
-    public void removePlayer(Player player, boolean refund) {
-        if (gameState != GameState.LOBBY || !participantsOriginalLocations.containsKey(player.getUniqueId())) return;
-
-        if (refund) {
-            plugin.getEconomy().depositPlayer(player, entryFee);
-            player.sendMessage(Component.text("你已离开大厅，报名费已退还。", NamedTextColor.YELLOW));
+    /**
+     * [重构] 统一的玩家离开处理方法。
+     * @param player 离开的玩家
+     */
+    public void handleLeave(Player player) {
+        GamePlayer gamePlayer = gamePlayers.get(player.getUniqueId());
+        if (gamePlayer == null) {
+            player.sendMessage(Component.text("你没有参与当前的游戏。", NamedTextColor.RED));
+            return;
         }
 
-        miniGameAPI.restorePlayerData(player);
-        miniGameAPI.leaveGame(player, plugin);
+        switch (gamePlayer.getState()) {
+            case PARTICIPANT: // 在大厅离开
+                plugin.getEconomy().depositPlayer(player, entryFee);
+                player.sendMessage(Component.text("你已离开大厅，报名费已退还。", NamedTextColor.YELLOW));
+                cleanupPlayerData(player, gamePlayer.getOriginalLocation());
+                broadcastMessage(NamedTextColor.GRAY, player.getName() + " 已离开大厅。");
+                if (getParticipantCount() < 2 && lobbyUpdateTask != null) {
+                    lobbyUpdateTask.cancel();
+                    lobbyUpdateTask = null;
+                    if (bossBar != null) bossBar.removeAll();
+                    bossBar = null;
+                    broadcastMessage(NamedTextColor.YELLOW, "人数不足，游戏开始倒计时已暂停。");
+                }
+                break;
 
-        UUID uuid = player.getUniqueId();
-        participantsOriginalLocations.remove(uuid);
-        playerScores.remove(uuid);
-        killCounts.remove(uuid);
+            case ALIVE: // 游戏中主动退出 (/br leave)
+                player.sendMessage(Component.text("你已主动退出游戏，被视为淘汰。", NamedTextColor.YELLOW));
+                // 直接传送并恢复数据，不进入旁观模式
+                cleanupPlayerData(player, gamePlayer.getOriginalLocation());
+                broadcastMessage(NamedTextColor.AQUA, player.getName() + " 主动退出了游戏。 [" + (getAlivePlayerCount() - 1) + "/" + getParticipantCount() + " 剩余]");
+                if (getAlivePlayerCount() <= 1) {
+                    endGame();
+                }
+                break;
 
-        if (bossBar != null) {
-            bossBar.removePlayer(player);
-        }
-
-        broadcastMessage(NamedTextColor.GRAY, player.getName() + " 已离开大厅。");
-        if (participantsOriginalLocations.size() < 2 && lobbyUpdateTask != null) {
-            lobbyUpdateTask.cancel();
-            lobbyUpdateTask = null;
-            if (bossBar != null) bossBar.removeAll();
-            bossBar = null;
-            broadcastMessage(NamedTextColor.YELLOW, "人数不足，游戏开始倒计时已暂停。");
+            case SPECTATOR: // 旁观者离开
+                player.sendMessage(Component.text("你已离开观战。", NamedTextColor.GREEN));
+                cleanupPlayerData(player, gamePlayer.getOriginalLocation());
+                break;
         }
     }
 
     /**
-     * [修复] 处理玩家在游戏中主动退出的逻辑。
-     * 通过将玩家生命值设为0来触发正常的死亡流程，以确保所有逻辑（重生、传送、数据恢复）都能正确执行。
-     * @param player 主动退出的玩家
+     * [重构] 统一的玩家淘汰处理方法。
+     * @param victim 被淘汰的玩家
+     * @param killer 击杀者 (可能为null)
      */
-    public void playerQuitInGame(Player player) {
-        // 确保玩家仍然存活，避免重复处理
-        if (!isPlayerAlive(player)) return;
+    public void handleElimination(Player victim, @Nullable Player killer) {
+        GamePlayer victimGP = gamePlayers.get(victim.getUniqueId());
+        if (victimGP == null || victimGP.getState() != PlayerState.ALIVE) return;
 
-        player.sendMessage(Component.text("你已主动退出游戏。", NamedTextColor.YELLOW));
+        SoundManager.playSound(victim, SoundManager.GameSound.PLAYER_DEATH);
+        if (bossBar != null) bossBar.removePlayer(victim);
 
-        // 将玩家生命值设置为0，这将触发 PlayerDeathEvent
-        // 我们的 PlayerListener 会监听到这个事件，并调用 handlePlayerDeath
-        // 从而将“主动退出”统一到标准的“死亡淘汰”流程中
-        player.setHealth(0.0);
+        String deathMessage;
+        if (killer != null && isPlayerAlive(killer)) {
+            GamePlayer killerGP = gamePlayers.get(killer.getUniqueId());
+            if (killerGP != null) {
+                killerGP.incrementKills();
+                killerGP.addScore(KILL_POINTS);
+                killer.sendMessage(Component.text("击杀成功！", NamedTextColor.GREEN).append(Component.text(" +" + KILL_POINTS + " 积分 (总积分: " + killerGP.getScore() + ")", NamedTextColor.GOLD)));
+                SoundManager.playSound(killer, SoundManager.GameSound.KILL_PLAYER);
+                deathMessage = victim.getName() + " 被 " + killer.getName() + " 淘汰 (" + killerGP.getKills() + " 击杀)。";
+            } else {
+                deathMessage = victim.getName() + " 被 " + killer.getName() + " 淘汰。";
+            }
+        } else {
+            deathMessage = victim.getName() + " 被淘汰。";
+        }
+        broadcastMessage(NamedTextColor.AQUA, deathMessage + " [" + (getAlivePlayerCount() - 1) + "/" + getParticipantCount() + " 剩余]");
+
+        // 标记玩家为旁观者，具体的模式切换将在PlayerRespawnEvent中处理
+        victimGP.setState(PlayerState.SPECTATOR);
+
+        if (getAlivePlayerCount() <= 1) {
+            endGame();
+        }
+    }
+
+    private void startGame() {
+        setGameState(GameState.PREPARING);
+        broadcastMessage(NamedTextColor.BLUE, "游戏开始！正在准备世界...");
+
+        // [Bug修复] 在传送和清空背包前保存所有玩家数据
+        getOnlineParticipants().forEach(p -> {
+            if (!miniGameAPI.savePlayerData(p)) {
+                p.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
+                handleLeave(p); // 使用统一的离开逻辑
+            } else {
+                // 更新玩家状态为游戏中
+                GamePlayer gp = gamePlayers.get(p.getUniqueId());
+                if(gp != null) gp.setState(PlayerState.ALIVE);
+            }
+        });
+
+        gameWorldName = "br_" + System.currentTimeMillis();
+        World gameWorld = worldManager.createWorld(gameWorldName);
+        if (gameWorld == null) {
+            broadcastMessage(NamedTextColor.RED, "严重错误：无法创建游戏世界，游戏取消。");
+            forceEndGame();
+            return;
+        }
+
+        for (Player p : getOnlineAlivePlayers()) {
+            worldManager.teleportPlayerToRandomLocation(p, gameWorld);
+            miniGameAPI.clearPlayerData(p); // 清空背包和状态
+            frozenPlayers.add(p.getUniqueId());
+            p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
+            p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 20, 255, false, false));
+            p.showTitle(Title.title(
+                    Component.text("准备战斗", NamedTextColor.RED),
+                    Component.text("寻找物资，准备厮杀！", NamedTextColor.GRAY),
+                    Title.Times.times(Duration.ofSeconds(1), Duration.ofSeconds(4), Duration.ofSeconds(1))
+            ));
+        }
+        startPreparationCountdown();
+    }
+
+    /**
+     * [修改] 此方法现在只负责应用旁观者效果，不再触发重生。
+     * 它将在玩家重生后被调用。
+     * @param player 需要设置为旁观者的玩家
+     */
+    public void applySpectatorMode(Player player) {
+        if (!player.isOnline()) return;
+        player.setGameMode(GameMode.SPECTATOR);
+        player.getInventory().clear(); // 清空物品栏
+        player.getInventory().setItem(8, MenuManager.getLeaveItem()); // 添加离开物品
+        player.sendMessage(Component.text("你已被淘汰，进入旁观模式。点击物品栏中的屏障方块或使用 /br leave 离开。", NamedTextColor.YELLOW));
+    }
+
+    private void endGame() {
+        if (gameState != GameState.INGAME) return;
+
+        if (gameUpdateTask != null) gameUpdateTask.cancel();
+        setGameState(GameState.CLEANUP);
+
+        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
+        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS != 0) {
+            getAliveGamePlayers().forEach(gp -> gp.addScore(SURVIVAL_POINTS));
+        }
+
+        double totalPot = entryFee * getParticipantCount();
+        long totalPointsScored = gamePlayers.values().stream().mapToLong(GamePlayer::getScore).sum();
+        if (totalPointsScored == 0) totalPointsScored = 1;
+
+        List<GamePlayer> sortedScores = gamePlayers.values().stream()
+                .sorted(Comparator.comparingInt(GamePlayer::getScore).reversed())
+                .collect(Collectors.toList());
+
+        Bukkit.broadcast(Component.text(""));
+        Bukkit.broadcast(Component.text("================[ 游戏结束 ]================", NamedTextColor.GOLD));
+        Bukkit.broadcast(Component.text(" 总奖池: ", NamedTextColor.GRAY).append(Component.text(String.format("%.2f", totalPot), NamedTextColor.YELLOW)));
+
+        for (int i = 0; i < sortedScores.size(); i++) {
+            GamePlayer gp = sortedScores.get(i);
+            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(gp.getUuid());
+            String playerName = offlinePlayer.getName() != null ? offlinePlayer.getName() : "未知玩家";
+            double payout = (totalPointsScored > 0) ? totalPot * ((double) gp.getScore() / totalPointsScored) : 0;
+
+            plugin.getEconomy().depositPlayer(offlinePlayer, payout);
+
+            Component rank = Component.text("#" + (i + 1), NamedTextColor.AQUA);
+            Component playerText = Component.text(" " + playerName, NamedTextColor.WHITE);
+            Component scoreText = Component.text(" - " + gp.getScore() + " 积分", NamedTextColor.GRAY);
+            Component payoutText = Component.text(" (奖金: " + String.format("%.2f", payout) + ")", NamedTextColor.GREEN);
+            Bukkit.broadcast(rank.append(playerText).append(scoreText).append(payoutText));
+
+            if (offlinePlayer.isOnline()) {
+                Player onlinePlayer = offlinePlayer.getPlayer();
+                onlinePlayer.sendMessage(Component.text("你获得了 ", NamedTextColor.GOLD)
+                        .append(Component.text(String.format("%.2f", payout), NamedTextColor.YELLOW))
+                        .append(Component.text(" 奖金！", NamedTextColor.GOLD)));
+                if (i == 0 && gp.getState() == PlayerState.ALIVE) { // 只有胜利者听到胜利音效
+                    SoundManager.playSound(onlinePlayer, SoundManager.GameSound.GAME_WIN);
+                }
+            }
+        }
+        Bukkit.broadcast(Component.text("==========================================", NamedTextColor.GOLD));
+        Bukkit.broadcast(Component.text(""));
+        Bukkit.getScheduler().runTaskLater(plugin, this::endGameCleanup, 20 * 15L);
+    }
+
+    private void endGameCleanup() {
+        // [重构] 恢复所有参与游戏的人，包括旁观者
+        new HashSet<>(gamePlayers.keySet()).forEach(uuid -> {
+            Player p = Bukkit.getPlayer(uuid);
+            if (p != null) {
+                GamePlayer gp = gamePlayers.get(uuid);
+                if (gp != null) {
+                    cleanupPlayerData(p, gp.getOriginalLocation());
+                }
+            }
+        });
+
+        if (bossBar != null) bossBar.removeAll();
+        bossBar = null;
+        if (gameWorldName != null) worldManager.deleteWorld(gameWorldName);
+        if (lobbyUpdateTask != null) lobbyUpdateTask.cancel();
+        if (gameUpdateTask != null) gameUpdateTask.cancel();
+        if (preparationTask != null) preparationTask.cancel();
+
+        gamePlayers.clear();
+        frozenPlayers.clear();
+        entryFee = 0;
+        isPvpEnabled = false;
+        setGameState(GameState.IDLE);
+    }
+
+    public void forceEndGame() {
+        if (gameState == GameState.IDLE) return;
+        broadcastMessage(NamedTextColor.RED, "游戏被强制中止，将退还所有报名费并恢复数据。");
+        new HashSet<>(gamePlayers.keySet()).forEach(uuid -> {
+            plugin.getEconomy().depositPlayer(Bukkit.getOfflinePlayer(uuid), entryFee);
+            Player onlinePlayer = Bukkit.getPlayer(uuid);
+            if (onlinePlayer != null) {
+                GamePlayer gp = gamePlayers.get(uuid);
+                if (gp != null) {
+                    cleanupPlayerData(onlinePlayer, gp.getOriginalLocation());
+                }
+            }
+        });
+        endGameCleanup();
+    }
+
+    /**
+     * [新增] 辅助方法，用于清理和恢复单个玩家的数据。
+     */
+    private void cleanupPlayerData(Player player, Location originalLocation) {
+        if (player.isOnline()) {
+            player.setGameMode(GameMode.SURVIVAL); // 确保恢复为生存模式
+            if (originalLocation != null) player.teleport(originalLocation);
+            miniGameAPI.restorePlayerData(player);
+        }
+        miniGameAPI.leaveGame(player, plugin);
+        gamePlayers.remove(player.getUniqueId());
+        if (bossBar != null) bossBar.removePlayer(player);
+    }
+
+    private void updateGame() {
+        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
+        World gameWorld = Bukkit.getWorld(gameWorldName);
+        if (gameWorld == null) {
+            forceEndGame();
+            return;
+        }
+
+        // 发放生存积分
+        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS == 0) {
+            getAliveGamePlayers().forEach(gp -> gp.addScore(SURVIVAL_POINTS));
+        }
+
+        // 开启PVP
+        if (!isPvpEnabled && elapsedSeconds >= 60) {
+            isPvpEnabled = true;
+            broadcastMessage(NamedTextColor.RED, "PVP已开启！");
+            SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.PVP_ENABLE);
+        }
+
+        // 更新BossBar
+        if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
+            bossBar.getPlayers().forEach(p -> {
+                String scoreSuffix = " | 积分: " + getPlayerScore(p);
+                int aliveCount = getAlivePlayerCount();
+                if (elapsedSeconds < 60) {
+                    long pvpTime = 60 - elapsedSeconds;
+                    bossBar.setTitle("PVP 将在 " + pvpTime + " 秒后开启" + scoreSuffix);
+                } else if (elapsedSeconds < 600) {
+                    long borderTime = 600 - elapsedSeconds;
+                    bossBar.setTitle("边界将在 " + formatTime(borderTime) + " 后缩小 | " + aliveCount + " 人存活" + scoreSuffix);
+                } else if (elapsedSeconds < 1200) {
+                    bossBar.setTitle("边界缩小中！ | " + aliveCount + " 人存活" + scoreSuffix);
+                } else {
+                    bossBar.setTitle("最终决战！ | " + aliveCount + " 人存活" + scoreSuffix);
+                }
+            });
+
+            if (elapsedSeconds < 60) {
+                bossBar.setProgress((60.0 - elapsedSeconds) / 60.0);
+                bossBar.setColor(BarColor.GREEN);
+            } else if (elapsedSeconds < 600) {
+                bossBar.setProgress((600.0 - elapsedSeconds) / 540.0);
+                bossBar.setColor(BarColor.YELLOW);
+            } else if (elapsedSeconds == 600) {
+                broadcastMessage(NamedTextColor.DARK_RED, "警告！边界将在10分钟内缩小至 100x100！");
+                gameWorld.getWorldBorder().setSize(100, 600);
+                SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.BORDER_SHRINK_WARN);
+            } else if (elapsedSeconds < 1200) {
+                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 1000.0);
+                bossBar.setColor(BarColor.RED);
+            } else if (elapsedSeconds == 1200) {
+                broadcastMessage(NamedTextColor.DARK_RED, "决赛圈！边界将在5分钟内完全闭合！");
+                gameWorld.getWorldBorder().setSize(1, 300);
+            } else {
+                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 100.0);
+                bossBar.setColor(BarColor.PURPLE);
+            }
+        }
+
+        // 检查玩家是否离开游戏区域
+        List<Player> toDisqualify = new ArrayList<>();
+        for (Player p : getOnlineAlivePlayers()) {
+            if (!p.getWorld().getName().equals(gameWorldName)) {
+                toDisqualify.add(p);
+                p.sendMessage(Component.text("你因离开游戏区域而被淘汰。", NamedTextColor.RED));
+            }
+        }
+        toDisqualify.forEach(p -> handleElimination(p, null));
     }
 
     private void startLobbyCountdown() {
@@ -208,7 +461,7 @@ public class GameManager {
             starter.sendMessage(Component.text("游戏当前未处于大厅等待状态。", NamedTextColor.RED));
             return;
         }
-        if (participantsOriginalLocations.size() < 2) {
+        if (getParticipantCount() < 2) {
             starter.sendMessage(Component.text("玩家人数不足2人，无法强制开始。", NamedTextColor.RED));
             return;
         }
@@ -228,34 +481,6 @@ public class GameManager {
         }
 
         Bukkit.getScheduler().runTask(plugin, this::startGame);
-    }
-
-    private void startGame() {
-        setGameState(GameState.PREPARING);
-        broadcastMessage(NamedTextColor.BLUE, "游戏开始！正在准备世界...");
-        gameWorldName = "br_" + System.currentTimeMillis();
-        World gameWorld = worldManager.createWorld(gameWorldName);
-
-        if (gameWorld == null) {
-            broadcastMessage(NamedTextColor.RED, "严重错误：无法创建游戏世界，游戏取消。");
-            forceEndGame();
-            return;
-        }
-
-        alivePlayers.addAll(participantsOriginalLocations.keySet());
-        for (Player p : getOnlineParticipants()) {
-            worldManager.teleportPlayerToRandomLocation(p, gameWorld);
-            miniGameAPI.clearPlayerData(p);
-            frozenPlayers.add(p.getUniqueId());
-            p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
-            p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 20, 255, false, false));
-            p.showTitle(Title.title(
-                    Component.text("准备战斗", NamedTextColor.RED),
-                    Component.text("寻找物资，准备厮杀！", NamedTextColor.GRAY),
-                    Title.Times.times(Duration.ofSeconds(1), Duration.ofSeconds(4), Duration.ofSeconds(1))
-            ));
-        }
-        startPreparationCountdown();
     }
 
     private void startPreparationCountdown() {
@@ -310,237 +535,6 @@ public class GameManager {
         gameUpdateTask = Bukkit.getScheduler().runTaskTimer(plugin, this::updateGame, 0L, 20L);
     }
 
-    private void updateGame() {
-        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
-        World gameWorld = Bukkit.getWorld(gameWorldName);
-        if (gameWorld == null) {
-            forceEndGame();
-            return;
-        }
-
-        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS == 0) {
-            for (UUID uuid : alivePlayers) {
-                playerScores.compute(uuid, (key, oldVal) -> (oldVal == null) ? SURVIVAL_POINTS : oldVal + SURVIVAL_POINTS);
-            }
-        }
-
-        if (!isPvpEnabled && elapsedSeconds >= 60) {
-            isPvpEnabled = true;
-            broadcastMessage(NamedTextColor.RED, "PVP已开启！");
-            SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.PVP_ENABLE);
-        }
-
-        if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
-            bossBar.getPlayers().forEach(p -> {
-                String scoreSuffix = " | 积分: " + getPlayerScore(p);
-                if (elapsedSeconds < 60) {
-                    long pvpTime = 60 - elapsedSeconds;
-                    bossBar.setTitle("PVP 将在 " + pvpTime + " 秒后开启" + scoreSuffix);
-                } else if (elapsedSeconds < 600) {
-                    long borderTime = 600 - elapsedSeconds;
-                    bossBar.setTitle("边界将在 " + formatTime(borderTime) + " 后缩小 | " + alivePlayers.size() + " 人存活" + scoreSuffix);
-                } else if (elapsedSeconds < 1200) {
-                    bossBar.setTitle("边界缩小中！ | " + alivePlayers.size() + " 人存活" + scoreSuffix);
-                } else {
-                    bossBar.setTitle("最终决战！ | " + alivePlayers.size() + " 人存活" + scoreSuffix);
-                }
-            });
-
-            if (elapsedSeconds < 60) {
-                bossBar.setProgress((60.0 - elapsedSeconds) / 60.0);
-                bossBar.setColor(BarColor.GREEN);
-            } else if (elapsedSeconds < 600) {
-                bossBar.setProgress((600.0 - elapsedSeconds) / 540.0);
-                bossBar.setColor(BarColor.YELLOW);
-            } else if (elapsedSeconds == 600) {
-                broadcastMessage(NamedTextColor.DARK_RED, "警告！边界将在10分钟内缩小至 100x100！");
-                gameWorld.getWorldBorder().setSize(100, 600);
-                SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.BORDER_SHRINK_WARN);
-            } else if (elapsedSeconds < 1200) {
-                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 1000.0);
-                bossBar.setColor(BarColor.RED);
-            } else if (elapsedSeconds == 1200) {
-                broadcastMessage(NamedTextColor.DARK_RED, "决赛圈！边界将在5分钟内完全闭合！");
-                gameWorld.getWorldBorder().setSize(1, 300);
-            } else {
-                bossBar.setProgress(gameWorld.getWorldBorder().getSize() / 100.0);
-                bossBar.setColor(BarColor.PURPLE);
-            }
-        }
-
-        List<Player> toDisqualify = new ArrayList<>();
-        for (UUID uuid : alivePlayers) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null && !p.getWorld().getName().equals(gameWorldName)) {
-                toDisqualify.add(p);
-                p.sendMessage(Component.text("你因离开游戏区域而被淘汰。", NamedTextColor.RED));
-            }
-        }
-        toDisqualify.forEach(p -> handlePlayerDeath(p, null));
-    }
-
-    public void handlePlayerDeath(Player victim, Player killer) {
-        if (gameState != GameState.INGAME) return;
-
-        UUID victimUUID = victim.getUniqueId();
-        if (!alivePlayers.contains(victimUUID)) return;
-
-        SoundManager.playSound(victim, SoundManager.GameSound.PLAYER_DEATH);
-        alivePlayers.remove(victimUUID);
-        if (bossBar != null) bossBar.removePlayer(victim);
-
-        String deathMessage;
-        if (killer != null && alivePlayers.contains(killer.getUniqueId())) {
-            int kills = killCounts.merge(killer.getUniqueId(), 1, Integer::sum);
-            int newScore = playerScores.merge(killer.getUniqueId(), KILL_POINTS, Integer::sum);
-            killer.sendMessage(Component.text("击杀成功！", NamedTextColor.GREEN).append(Component.text(" +" + KILL_POINTS + " 积分 (总积分: " + newScore + ")", NamedTextColor.GOLD)));
-            SoundManager.playSound(killer, SoundManager.GameSound.KILL_PLAYER);
-            deathMessage = victim.getName() + " 被 " + killer.getName() + " 淘汰 (" + kills + " 击杀)。";
-        } else {
-            deathMessage = victim.getName() + " 被淘汰。";
-        }
-        broadcastMessage(NamedTextColor.AQUA, deathMessage + " [" + alivePlayers.size() + "/" + participantsOriginalLocations.size() + " 剩余]");
-
-        Location originalLocation = participantsOriginalLocations.get(victimUUID);
-
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (victim.isOnline()) {
-                victim.spigot().respawn();
-                if (originalLocation != null) {
-                    victim.teleport(originalLocation);
-                }
-
-                miniGameAPI.restorePlayerData(victim);
-                victim.sendMessage(Component.text("你已被淘汰，数据已恢复。", NamedTextColor.GREEN));
-            }
-            miniGameAPI.leaveGame(victim, plugin);
-        });
-
-        if (alivePlayers.size() <= 1) {
-            endGame();
-        }
-    }
-
-    private void endGame() {
-        if (gameState != GameState.INGAME) return;
-
-        if (gameUpdateTask != null) gameUpdateTask.cancel();
-        setGameState(GameState.CLEANUP);
-
-        long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
-        if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS != 0) {
-            for (UUID uuid : alivePlayers) {
-                playerScores.compute(uuid, (key, oldVal) -> (oldVal == null) ? SURVIVAL_POINTS : oldVal + SURVIVAL_POINTS);
-            }
-        }
-
-        double totalPot = entryFee * participantsOriginalLocations.size();
-        long totalPointsScored = playerScores.values().stream().mapToLong(Integer::longValue).sum();
-        if (totalPointsScored == 0) totalPointsScored = 1;
-
-        List<Map.Entry<UUID, Integer>> sortedScores = playerScores.entrySet().stream()
-                .sorted(Map.Entry.comparingByValue(Comparator.reverseOrder()))
-                .collect(Collectors.toList());
-
-        Bukkit.broadcast(Component.text(""));
-        Bukkit.broadcast(Component.text("================[ 游戏结束 ]================", NamedTextColor.GOLD));
-        Bukkit.broadcast(Component.text(" 总奖池: ", NamedTextColor.GRAY).append(Component.text(String.format("%.2f", totalPot), NamedTextColor.YELLOW)));
-
-        for (int i = 0; i < sortedScores.size(); i++) {
-            Map.Entry<UUID, Integer> entry = sortedScores.get(i);
-            UUID playerUUID = entry.getKey();
-            int score = entry.getValue();
-            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(playerUUID);
-            String playerName = offlinePlayer.getName() != null ? offlinePlayer.getName() : "未知玩家";
-            double payout = (totalPointsScored > 0) ? totalPot * ((double) score / totalPointsScored) : 0;
-
-            plugin.getEconomy().depositPlayer(offlinePlayer, payout);
-
-            Component rank = Component.text("#" + (i + 1), NamedTextColor.AQUA);
-            Component playerText = Component.text(" " + playerName, NamedTextColor.WHITE);
-            Component scoreText = Component.text(" - " + score + " 积分", NamedTextColor.GRAY);
-            Component payoutText = Component.text(" (奖金: " + String.format("%.2f", payout) + ")", NamedTextColor.GREEN);
-            Bukkit.broadcast(rank.append(playerText).append(scoreText).append(payoutText));
-
-            if (offlinePlayer.isOnline()) {
-                Player onlinePlayer = offlinePlayer.getPlayer();
-                onlinePlayer.sendMessage(Component.text("你获得了 ", NamedTextColor.GOLD)
-                        .append(Component.text(String.format("%.2f", payout), NamedTextColor.YELLOW))
-                        .append(Component.text(" 奖金！", NamedTextColor.GOLD)));
-                if (i == 0) {
-                    SoundManager.playSound(onlinePlayer, SoundManager.GameSound.GAME_WIN);
-                }
-            }
-        }
-        Bukkit.broadcast(Component.text("==========================================", NamedTextColor.GOLD));
-        Bukkit.broadcast(Component.text(""));
-        Bukkit.getScheduler().runTaskLater(plugin, this::endGameCleanup, 20 * 15L);
-    }
-
-    private void endGameCleanup() {
-        for (UUID uuid : alivePlayers) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null) {
-                Location loc = participantsOriginalLocations.get(uuid);
-                if (loc != null) p.teleport(loc);
-                miniGameAPI.restorePlayerData(p);
-                miniGameAPI.leaveGame(p, plugin);
-            }
-        }
-        alivePlayers.clear();
-
-        if (bossBar != null) bossBar.removeAll();
-        bossBar = null;
-        if (gameWorldName != null) worldManager.deleteWorld(gameWorldName);
-        if (lobbyUpdateTask != null) lobbyUpdateTask.cancel();
-        if (gameUpdateTask != null) gameUpdateTask.cancel();
-        if (preparationTask != null) preparationTask.cancel();
-
-        participantsOriginalLocations.clear();
-        killCounts.clear();
-        frozenPlayers.clear();
-        playerScores.clear();
-        entryFee = 0;
-        isPvpEnabled = false;
-        setGameState(GameState.IDLE);
-    }
-
-    public void forceEndGame() {
-        if (gameState == GameState.IDLE) return;
-        broadcastMessage(NamedTextColor.RED, "游戏被强制中止，将退还所有报名费并恢复数据。");
-        new HashSet<>(participantsOriginalLocations.keySet()).forEach(uuid -> {
-            OfflinePlayer p = Bukkit.getOfflinePlayer(uuid);
-            plugin.getEconomy().depositPlayer(p, entryFee);
-            Player onlinePlayer = Bukkit.getPlayer(uuid);
-            if (onlinePlayer != null) {
-                Location loc = participantsOriginalLocations.get(uuid);
-                if (loc != null) onlinePlayer.teleport(loc);
-                miniGameAPI.restorePlayerData(onlinePlayer);
-                miniGameAPI.leaveGame(onlinePlayer, plugin);
-            }
-        });
-        endGameCleanup();
-    }
-
-    private List<Player> getOnlineParticipants() {
-        return participantsOriginalLocations.keySet().stream()
-                .map(Bukkit::getPlayer)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-    }
-
-    private List<Player> getOnlineAlivePlayers() {
-        return alivePlayers.stream()
-                .map(Bukkit::getPlayer)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-    }
-
-    private int getPlayerScore(Player player) {
-        if (player == null) return 0;
-        return playerScores.getOrDefault(player.getUniqueId(), 0);
-    }
-
     private void broadcastMessage(NamedTextColor color, String message) {
         Component component = Component.text("[大逃杀] ", NamedTextColor.GOLD).append(Component.text(message, color));
         Bukkit.broadcast(component);
@@ -552,26 +546,63 @@ public class GameManager {
         return String.format("%02d:%02d", minutes, remainingSeconds);
     }
 
-    public boolean isPlayerInGame(Player player) { return participantsOriginalLocations.containsKey(player.getUniqueId()); }
-    public boolean isPlayerFrozen(Player player) { return frozenPlayers.contains(player.getUniqueId()); }
+    // --- [重构] Helper 和 Getter 方法 ---
 
-    public void unfreezePlayer(Player player) {
-        frozenPlayers.remove(player.getUniqueId());
+    public boolean isPlayerInGame(Player player) {
+        return gamePlayers.containsKey(player.getUniqueId());
     }
 
     public boolean isPlayerAlive(Player player) {
         if (player == null) return false;
-        return alivePlayers.contains(player.getUniqueId());
+        GamePlayer gp = gamePlayers.get(player.getUniqueId());
+        return gp != null && gp.getState() == PlayerState.ALIVE;
     }
 
+    public PlayerState getPlayerState(Player player) {
+        if (player == null) return null;
+        GamePlayer gp = gamePlayers.get(player.getUniqueId());
+        return gp != null ? gp.getState() : null;
+    }
+
+    private List<GamePlayer> getAliveGamePlayers() {
+        return gamePlayers.values().stream()
+                .filter(gp -> gp.getState() == PlayerState.ALIVE)
+                .collect(Collectors.toList());
+    }
+
+    private List<Player> getOnlineParticipants() {
+        return gamePlayers.values().stream()
+                .filter(gp -> gp.getState() == PlayerState.PARTICIPANT)
+                .map(gp -> Bukkit.getPlayer(gp.getUuid()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    private List<Player> getOnlineAlivePlayers() {
+        return gamePlayers.values().stream()
+                .filter(gp -> gp.getState() == PlayerState.ALIVE)
+                .map(gp -> Bukkit.getPlayer(gp.getUuid()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    public int getParticipantCount() {
+        return gamePlayers.size();
+    }
+
+    public int getAlivePlayerCount() {
+        return (int) gamePlayers.values().stream().filter(gp -> gp.getState() == PlayerState.ALIVE).count();
+    }
+
+    private int getPlayerScore(Player player) {
+        if (player == null) return 0;
+        GamePlayer gp = gamePlayers.get(player.getUniqueId());
+        return gp != null ? gp.getScore() : 0;
+    }
+
+    public boolean isPlayerFrozen(Player player) { return frozenPlayers.contains(player.getUniqueId()); }
     public String getGameWorldName() { return gameWorldName; }
     public GameState getGameState() { return gameState; }
     private void setGameState(GameState newState) { this.gameState = newState; }
     public boolean isPvpEnabled() { return isPvpEnabled; }
-    public int getParticipantCount() {
-        return participantsOriginalLocations.size();
-    }
-    public int getAlivePlayerCount() {
-        return alivePlayers.size();
-    }
 }

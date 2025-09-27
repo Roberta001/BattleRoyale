@@ -7,6 +7,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import xyz.leafing.battleRoyale.GameManager;
@@ -198,5 +199,24 @@ public class MenuManager {
                 }
             }
         }
+    }
+
+    /**
+     * [新增] 创建一个标准的“离开游戏”物品，用于旁观者模式。
+     * @return “离开游戏”的 ItemStack
+     */
+    public static ItemStack getLeaveItem() {
+        ItemStack item = new ItemStack(Material.BARRIER);
+        ItemMeta meta = item.getItemMeta();
+        if (meta != null) {
+            meta.displayName(Component.text("§c§l离开游戏", NamedTextColor.RED, TextDecoration.BOLD));
+            meta.lore(List.of(
+                    Component.text("§7点击以退出观战并返回大厅。", NamedTextColor.GRAY)
+                            .decoration(TextDecoration.ITALIC, false)
+            ));
+            meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+            item.setItemMeta(meta);
+        }
+        return item;
     }
 }

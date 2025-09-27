@@ -53,21 +53,12 @@ public class MenuListener implements Listener {
                 break;
             case DIAMOND_BLOCK:
                 player.closeInventory();
-                gameManager.addPlayer(player);
+                gameManager.handleJoinLobby(player);
                 break;
             case BARRIER: // 离开游戏按钮
                 player.closeInventory();
-                // [修复] 细化 '离开' 按钮的逻辑，使其和命令一致
-                GameState state = gameManager.getGameState();
-                if (state == GameState.LOBBY) {
-                    // 菜单UI保证了此时玩家肯定在游戏里
-                    gameManager.removePlayer(player, true);
-                } else if (state == GameState.INGAME || state == GameState.PREPARING) {
-                    // 菜单UI理论上不会给已淘汰的玩家显示这个按钮，但为了安全还是检查
-                    if (gameManager.isPlayerAlive(player)) {
-                        gameManager.playerQuitInGame(player);
-                    }
-                }
+                // [重构] 统一调用 handleLeave
+                gameManager.handleLeave(player);
                 break;
             case COMMAND_BLOCK:
                 if (player.hasPermission("br.admin")) {

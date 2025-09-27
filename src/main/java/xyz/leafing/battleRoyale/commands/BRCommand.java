@@ -9,7 +9,6 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 import xyz.leafing.battleRoyale.GameManager;
 import xyz.leafing.battleRoyale.ui.MenuManager;
-import xyz.leafing.battleRoyale.GameState;
 
 public class BRCommand implements CommandExecutor {
 
@@ -56,32 +55,11 @@ public class BRCommand implements CommandExecutor {
                 }
                 break;
             case "join":
-                gameManager.addPlayer(player);
+                gameManager.handleJoinLobby(player);
                 break;
             case "leave":
-                // [修复] 细化 'leave' 命令的逻辑，根据游戏状态和玩家状态执行不同操作
-                GameState state = gameManager.getGameState();
-                if (state == GameState.LOBBY) {
-                    if (gameManager.isPlayerInGame(player)) {
-                        // 玩家在LOBBY中，正常退出
-                        gameManager.removePlayer(player, true);
-                    } else {
-                        player.sendMessage(Component.text("你当前不在游戏大厅中。", NamedTextColor.RED));
-                    }
-                } else if (state == GameState.INGAME || state == GameState.PREPARING) {
-                    if (gameManager.isPlayerAlive(player)) {
-                        // 玩家在游戏中且存活，视为主动淘汰 (触发死亡)
-                        gameManager.playerQuitInGame(player);
-                    } else if (gameManager.isPlayerInGame(player)) {
-                        // 玩家曾是参与者但已被淘汰
-                        player.sendMessage(Component.text("你已经被淘汰，无需离开。", NamedTextColor.YELLOW));
-                    } else {
-                        // 玩家根本没有参与这场游戏
-                        player.sendMessage(Component.text("你没有参与当前的游戏。", NamedTextColor.RED));
-                    }
-                } else {
-                    player.sendMessage(Component.text("当前没有可以离开的游戏。", NamedTextColor.RED));
-                }
+                // [重构] 统一调用 handleLeave，所有逻辑都在 GameManager 中处理
+                gameManager.handleLeave(player);
                 break;
             case "forcestart":
                 if (!player.hasPermission("br.admin")) {

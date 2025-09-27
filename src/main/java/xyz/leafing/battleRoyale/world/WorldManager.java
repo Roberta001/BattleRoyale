@@ -13,7 +13,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
-import java.util.List;
 import java.util.Random;
 
 public class WorldManager {
@@ -38,7 +37,7 @@ public class WorldManager {
             border.setWarningDistance(10);
 
             // 设置游戏规则
-            world.setGameRuleValue("keepInventory", "false");
+            world.setGameRuleValue("keepInventory", "true"); // [修改] 启用保留物品栏
             world.setGameRuleValue("doDaylightCycle", "false"); // 可选
             world.setTime(6000); // 正午
         }
