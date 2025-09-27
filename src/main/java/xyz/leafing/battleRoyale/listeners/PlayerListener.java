@@ -20,6 +20,7 @@ import xyz.leafing.battleRoyale.ui.MenuManager;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 public class PlayerListener implements Listener {
 
@@ -45,38 +46,28 @@ public class PlayerListener implements Listener {
         Player victim = event.getPlayer();
         if (gameManager.getGameState() == GameState.INGAME && gameManager.isPlayerInGame(victim)) {
             event.deathMessage(null);
-            // keepInventory is true, so we don't need to worry about drops
             gameManager.handleElimination(victim, victim.getKiller());
         }
     }
 
-    /**
-     * [新增 & Bug修复] 监听玩家重生事件，确保旁观者在游戏世界内重生。
-     */
     @EventHandler
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
-        // 检查这个玩家是否在我们的游戏中，并且状态应该是旁观者
         if (gameManager.getPlayerState(player) == PlayerState.SPECTATOR) {
             World gameWorld = Bukkit.getWorld(gameManager.getGameWorldName());
             if (gameWorld != null) {
-                // 获取玩家死亡地点作为重生点。如果获取失败，则使用世界出生点作为备用。
                 Location respawnLocation = player.getLastDeathLocation();
                 if (respawnLocation == null || !respawnLocation.getWorld().equals(gameWorld)) {
                     respawnLocation = gameWorld.getSpawnLocation();
                 }
-
-                // 强制设置重生地点在游戏世界内
                 event.setRespawnLocation(respawnLocation);
 
-                // 在玩家重生后的下一个tick再将他们设置为观察者模式，确保他们已经到达了正确的位置
                 Bukkit.getScheduler().runTask(BattleRoyale.getInstance(), () -> {
                     gameManager.applySpectatorMode(player);
                 });
             }
         }
     }
-
 
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent event) {
@@ -86,7 +77,7 @@ public class PlayerListener implements Listener {
             if (item != null && item.isSimilar(MenuManager.getLeaveItem())) {
                 gameManager.handleLeave(player);
             }
-            event.setCancelled(true); // 旁观者不能进行任何交互
+            event.setCancelled(true);
         }
         if (gameManager.isPlayerFrozen(player)) {
             event.setCancelled(true);
@@ -132,14 +123,30 @@ public class PlayerListener implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST)
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlayerTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
-        if (gameManager.isPlayerAlive(player)) {
-            if (event.getTo().getWorld() != null && !event.getTo().getWorld().getName().equals(gameManager.getGameWorldName())) {
-                event.setCancelled(true);
-                player.sendMessage(Component.text("You cannot teleport out of the game world.", NamedTextColor.RED));
-            }
+        World fromWorld = event.getFrom().getWorld();
+        World toWorld = event.getTo().getWorld();
+        String gameWorldName = gameManager.getGameWorldName();
+
+        if (toWorld == null || fromWorld == null || gameWorldName == null || fromWorld.equals(toWorld)) {
+            return; // 忽略同世界传送或无效世界
+        }
+
+        boolean isEnteringGameWorld = toWorld.getName().equals(gameWorldName);
+        boolean isLeavingGameWorld = fromWorld.getName().equals(gameWorldName);
+
+        // 处理存活玩家离开游戏世界
+        if (isLeavingGameWorld && gameManager.isPlayerAlive(player)) {
+            event.setCancelled(true);
+            player.sendMessage(Component.text("You cannot teleport out of the game world.", NamedTextColor.RED));
+        }
+        // [修改] 处理非游戏玩家进入游戏世界
+        else if (isEnteringGameWorld && !gameManager.isPlayerInGame(player)) {
+            // 取消原传送事件，交由 GameManager 处理，这样可以正确保存玩家传送前的位置
+            event.setCancelled(true);
+            gameManager.handleJoinAsSpectator(player);
         }
     }
 
@@ -148,7 +155,6 @@ public class PlayerListener implements Listener {
         if (!(event.getEntity() instanceof Player)) return;
 
         Player victim = (Player) event.getEntity();
-        // 旁观者不能受伤
         if (gameManager.getPlayerState(victim) == PlayerState.SPECTATOR) {
             event.setCancelled(true);
             return;
@@ -157,7 +163,6 @@ public class PlayerListener implements Listener {
         if (!(event.getDamager() instanceof Player)) return;
         Player attacker = (Player) event.getDamager();
 
-        // 旁观者不能攻击
         if (gameManager.getPlayerState(attacker) == PlayerState.SPECTATOR) {
             event.setCancelled(true);
             return;

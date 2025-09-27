@@ -19,6 +19,7 @@ import xyz.leafing.battleRoyale.world.WorldManager;
 import xyz.leafing.miniGameManager.api.MiniGameAPI;
 
 import javax.annotation.Nullable;
+import java.text.DecimalFormat;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,7 +32,6 @@ public class GameManager {
     private final WorldManager worldManager;
     private final MiniGameAPI miniGameAPI;
 
-    // [重构] 统一的玩家数据管理器
     private final Map<UUID, GamePlayer> gamePlayers = new ConcurrentHashMap<>();
 
     private GameState gameState = GameState.IDLE;
@@ -69,7 +69,7 @@ public class GameManager {
 
         this.entryFee = fee;
         setGameState(GameState.LOBBY);
-        handleJoinLobby(initiator); // 创建者自动加入
+        handleJoinLobby(initiator);
 
         Component joinMessage = Component.text("[点击加入]", NamedTextColor.GREEN, TextDecoration.BOLD)
                 .clickEvent(ClickEvent.runCommand("/br join"));
@@ -118,9 +118,38 @@ public class GameManager {
     }
 
     /**
-     * [重构] 统一的玩家离开处理方法。
-     * @param player 离开的玩家
+     * [新增] 处理非游戏玩家直接进入游戏世界的情况
+     * @param player 尝试进入的玩家
      */
+    public void handleJoinAsSpectator(Player player) {
+        if (gameState != GameState.INGAME && gameState != GameState.PREPARING) {
+            player.sendMessage(Component.text("当前游戏未在进行中，无法观战。", NamedTextColor.YELLOW));
+            // 把玩家踢回主城
+            player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
+            return;
+        }
+        if (isPlayerInGame(player)) return; // 已经在游戏里了，忽略
+
+        if (!miniGameAPI.enterGame(player, plugin)) {
+            player.sendMessage(Component.text("你已在另一场游戏中，无法观战！", NamedTextColor.RED));
+            player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
+            return;
+        }
+        if (!miniGameAPI.savePlayerData(player)) {
+            player.sendMessage(Component.text("错误：无法备份你的数据，无法进入观战。", NamedTextColor.RED));
+            miniGameAPI.leaveGame(player, plugin);
+            player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
+            return;
+        }
+
+        GamePlayer gamePlayer = new GamePlayer(player.getUniqueId(), player.getLocation());
+        gamePlayer.setState(PlayerState.SPECTATOR);
+        gamePlayers.put(player.getUniqueId(), gamePlayer);
+
+        player.sendMessage(Component.text("你已进入观战模式。", NamedTextColor.GREEN));
+        applySpectatorMode(player);
+    }
+
     public void handleLeave(Player player) {
         GamePlayer gamePlayer = gamePlayers.get(player.getUniqueId());
         if (gamePlayer == null) {
@@ -129,7 +158,7 @@ public class GameManager {
         }
 
         switch (gamePlayer.getState()) {
-            case PARTICIPANT: // 在大厅离开
+            case PARTICIPANT:
                 plugin.getEconomy().depositPlayer(player, entryFee);
                 player.sendMessage(Component.text("你已离开大厅，报名费已退还。", NamedTextColor.YELLOW));
                 cleanupPlayerData(player, gamePlayer.getOriginalLocation());
@@ -142,35 +171,28 @@ public class GameManager {
                     broadcastMessage(NamedTextColor.YELLOW, "人数不足，游戏开始倒计时已暂停。");
                 }
                 break;
-
-            case ALIVE: // 游戏中主动退出 (/br leave)
+            case ALIVE:
                 player.sendMessage(Component.text("你已主动退出游戏，被视为淘汰。", NamedTextColor.YELLOW));
-                // 直接传送并恢复数据，不进入旁观模式
                 cleanupPlayerData(player, gamePlayer.getOriginalLocation());
                 broadcastMessage(NamedTextColor.AQUA, player.getName() + " 主动退出了游戏。 [" + (getAlivePlayerCount() - 1) + "/" + getParticipantCount() + " 剩余]");
                 if (getAlivePlayerCount() <= 1) {
                     endGame();
                 }
                 break;
-
-            case SPECTATOR: // 旁观者离开
+            case SPECTATOR:
                 player.sendMessage(Component.text("你已离开观战。", NamedTextColor.GREEN));
                 cleanupPlayerData(player, gamePlayer.getOriginalLocation());
                 break;
         }
     }
 
-    /**
-     * [重构] 统一的玩家淘汰处理方法。
-     * @param victim 被淘汰的玩家
-     * @param killer 击杀者 (可能为null)
-     */
     public void handleElimination(Player victim, @Nullable Player killer) {
         GamePlayer victimGP = gamePlayers.get(victim.getUniqueId());
         if (victimGP == null || victimGP.getState() != PlayerState.ALIVE) return;
 
         SoundManager.playSound(victim, SoundManager.GameSound.PLAYER_DEATH);
-        if (bossBar != null) bossBar.removePlayer(victim);
+        // [修改] 旁观者也看BossBar，所以不再移除
+        // if (bossBar != null) bossBar.removePlayer(victim);
 
         String deathMessage;
         if (killer != null && isPlayerAlive(killer)) {
@@ -189,7 +211,6 @@ public class GameManager {
         }
         broadcastMessage(NamedTextColor.AQUA, deathMessage + " [" + (getAlivePlayerCount() - 1) + "/" + getParticipantCount() + " 剩余]");
 
-        // 标记玩家为旁观者，具体的模式切换将在PlayerRespawnEvent中处理
         victimGP.setState(PlayerState.SPECTATOR);
 
         if (getAlivePlayerCount() <= 1) {
@@ -201,13 +222,11 @@ public class GameManager {
         setGameState(GameState.PREPARING);
         broadcastMessage(NamedTextColor.BLUE, "游戏开始！正在准备世界...");
 
-        // [Bug修复] 在传送和清空背包前保存所有玩家数据
         getOnlineParticipants().forEach(p -> {
             if (!miniGameAPI.savePlayerData(p)) {
                 p.sendMessage(Component.text("错误：无法备份你的数据，已将你移出游戏。", NamedTextColor.RED));
-                handleLeave(p); // 使用统一的离开逻辑
+                handleLeave(p);
             } else {
-                // 更新玩家状态为游戏中
                 GamePlayer gp = gamePlayers.get(p.getUniqueId());
                 if(gp != null) gp.setState(PlayerState.ALIVE);
             }
@@ -223,7 +242,7 @@ public class GameManager {
 
         for (Player p : getOnlineAlivePlayers()) {
             worldManager.teleportPlayerToRandomLocation(p, gameWorld);
-            miniGameAPI.clearPlayerData(p); // 清空背包和状态
+            miniGameAPI.clearPlayerData(p);
             frozenPlayers.add(p.getUniqueId());
             p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 20 * 20, 1, false, false));
             p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 20 * 20, 255, false, false));
@@ -236,17 +255,16 @@ public class GameManager {
         startPreparationCountdown();
     }
 
-    /**
-     * [修改] 此方法现在只负责应用旁观者效果，不再触发重生。
-     * 它将在玩家重生后被调用。
-     * @param player 需要设置为旁观者的玩家
-     */
     public void applySpectatorMode(Player player) {
         if (!player.isOnline()) return;
         player.setGameMode(GameMode.SPECTATOR);
-        player.getInventory().clear(); // 清空物品栏
-        player.getInventory().setItem(8, MenuManager.getLeaveItem()); // 添加离开物品
-        player.sendMessage(Component.text("你已被淘汰，进入旁观模式。点击物品栏中的屏障方块或使用 /br leave 离开。", NamedTextColor.YELLOW));
+        player.getInventory().clear();
+        player.getInventory().setItem(8, MenuManager.getLeaveItem());
+        player.sendMessage(Component.text("你已进入观战模式。点击物品栏中的屏障方块或使用 /br leave 离开。", NamedTextColor.YELLOW));
+        // [修改] 确保新加入的旁观者能看到BossBar
+        if (bossBar != null && !bossBar.getPlayers().contains(player)) {
+            bossBar.addPlayer(player);
+        }
     }
 
     private void endGame() {
@@ -278,31 +296,38 @@ public class GameManager {
             String playerName = offlinePlayer.getName() != null ? offlinePlayer.getName() : "未知玩家";
             double payout = (totalPointsScored > 0) ? totalPot * ((double) gp.getScore() / totalPointsScored) : 0;
 
-            plugin.getEconomy().depositPlayer(offlinePlayer, payout);
+            // [修改] 修复奖金计算精度问题
+            double finalPayout = Math.floor(payout * 10) / 10.0;
+            plugin.getEconomy().depositPlayer(offlinePlayer, finalPayout);
 
             Component rank = Component.text("#" + (i + 1), NamedTextColor.AQUA);
             Component playerText = Component.text(" " + playerName, NamedTextColor.WHITE);
             Component scoreText = Component.text(" - " + gp.getScore() + " 积分", NamedTextColor.GRAY);
-            Component payoutText = Component.text(" (奖金: " + String.format("%.2f", payout) + ")", NamedTextColor.GREEN);
+            Component payoutText = Component.text(" (奖金: " + String.format("%.1f", finalPayout) + ")", NamedTextColor.GREEN);
             Bukkit.broadcast(rank.append(playerText).append(scoreText).append(payoutText));
 
             if (offlinePlayer.isOnline()) {
                 Player onlinePlayer = offlinePlayer.getPlayer();
                 onlinePlayer.sendMessage(Component.text("你获得了 ", NamedTextColor.GOLD)
-                        .append(Component.text(String.format("%.2f", payout), NamedTextColor.YELLOW))
+                        .append(Component.text(String.format("%.1f", finalPayout), NamedTextColor.YELLOW))
                         .append(Component.text(" 奖金！", NamedTextColor.GOLD)));
-                if (i == 0 && gp.getState() == PlayerState.ALIVE) { // 只有胜利者听到胜利音效
+                if (i == 0 && gp.getState() == PlayerState.ALIVE) {
                     SoundManager.playSound(onlinePlayer, SoundManager.GameSound.GAME_WIN);
                 }
             }
         }
         Bukkit.broadcast(Component.text("==========================================", NamedTextColor.GOLD));
         Bukkit.broadcast(Component.text(""));
-        Bukkit.getScheduler().runTaskLater(plugin, this::endGameCleanup, 20 * 15L);
+
+        // [修改] 立即遣返玩家，然后延迟清理世界
+        repatriateAllPlayers();
+        Bukkit.getScheduler().runTaskLater(plugin, this::cleanupWorldAndReset, 20L * 2); // 延迟2秒清理
     }
 
-    private void endGameCleanup() {
-        // [重构] 恢复所有参与游戏的人，包括旁观者
+    /**
+     * [新增] 遣返所有游戏内玩家
+     */
+    private void repatriateAllPlayers() {
         new HashSet<>(gamePlayers.keySet()).forEach(uuid -> {
             Player p = Bukkit.getPlayer(uuid);
             if (p != null) {
@@ -312,7 +337,12 @@ public class GameManager {
                 }
             }
         });
+    }
 
+    /**
+     * [新增] 清理世界并重置游戏状态
+     */
+    private void cleanupWorldAndReset() {
         if (bossBar != null) bossBar.removeAll();
         bossBar = null;
         if (gameWorldName != null) worldManager.deleteWorld(gameWorldName);
@@ -340,15 +370,12 @@ public class GameManager {
                 }
             }
         });
-        endGameCleanup();
+        cleanupWorldAndReset();
     }
 
-    /**
-     * [新增] 辅助方法，用于清理和恢复单个玩家的数据。
-     */
     private void cleanupPlayerData(Player player, Location originalLocation) {
         if (player.isOnline()) {
-            player.setGameMode(GameMode.SURVIVAL); // 确保恢复为生存模式
+            player.setGameMode(GameMode.SURVIVAL);
             if (originalLocation != null) player.teleport(originalLocation);
             miniGameAPI.restorePlayerData(player);
         }
@@ -357,6 +384,7 @@ public class GameManager {
         if (bossBar != null) bossBar.removePlayer(player);
     }
 
+    // ... (其他方法如 updateGame, startLobbyCountdown 等保持不变)
     private void updateGame() {
         long elapsedSeconds = (System.currentTimeMillis() - gameStartTime) / 1000;
         World gameWorld = Bukkit.getWorld(gameWorldName);
@@ -365,19 +393,16 @@ public class GameManager {
             return;
         }
 
-        // 发放生存积分
         if (elapsedSeconds > 0 && elapsedSeconds % SURVIVAL_POINT_INTERVAL_SECONDS == 0) {
             getAliveGamePlayers().forEach(gp -> gp.addScore(SURVIVAL_POINTS));
         }
 
-        // 开启PVP
         if (!isPvpEnabled && elapsedSeconds >= 60) {
             isPvpEnabled = true;
             broadcastMessage(NamedTextColor.RED, "PVP已开启！");
             SoundManager.broadcastSound(getOnlineAlivePlayers(), SoundManager.GameSound.PVP_ENABLE);
         }
 
-        // 更新BossBar
         if (bossBar != null && !bossBar.getPlayers().isEmpty()) {
             bossBar.getPlayers().forEach(p -> {
                 String scoreSuffix = " | 积分: " + getPlayerScore(p);
@@ -417,7 +442,6 @@ public class GameManager {
             }
         }
 
-        // 检查玩家是否离开游戏区域
         List<Player> toDisqualify = new ArrayList<>();
         for (Player p : getOnlineAlivePlayers()) {
             if (!p.getWorld().getName().equals(gameWorldName)) {
@@ -545,8 +569,6 @@ public class GameManager {
         long remainingSeconds = seconds % 60;
         return String.format("%02d:%02d", minutes, remainingSeconds);
     }
-
-    // --- [重构] Helper 和 Getter 方法 ---
 
     public boolean isPlayerInGame(Player player) {
         return gamePlayers.containsKey(player.getUniqueId());
