@@ -43,7 +43,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         # 这个 name 将是您在 GitHub 页面上看到的产物名称
-        name: my-java-app-jar
+        name: BattleRoyale
         # 这是要上传的文件的路径。
         # 'build/libs/*.jar' 会匹配 build/libs/ 目录下所有以 .jar 结尾的文件。
         # 使用通配符 * 是一个好习惯，因为文件名通常会包含版本号。
