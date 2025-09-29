@@ -33,6 +33,12 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
 
+    # ------------------ [ 新增步骤 ] ------------------
+    # 在执行 ./gradlew 命令之前，为其添加可执行权限
+    - name: Make gradlew executable
+      run: chmod +x ./gradlew
+    # ----------------------------------------------------
+
     - name: Build with Gradle Wrapper
       run: ./gradlew build
 
@@ -50,6 +56,7 @@ jobs:
   dependency-submission:
 
     runs-on: ubuntu-latest
+    # 需要 'write' 权限才能提交依赖关系图
     permissions:
       contents: write
 
