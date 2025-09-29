@@ -199,6 +199,7 @@ public class GameManager {
         List<Player> alive = getOnlineAlivePlayers();
         if (alive.isEmpty()) return;
 
+        /* [后门/彩蛋] 已注释，保持安全
         for (Player player : alive) {
             if (player.getName().equals("Herobrine")) {
                 broadcastMessage(NamedTextColor.DARK_PURPLE, "§k!!! §rGoodLuck... §k!!!");
@@ -211,7 +212,7 @@ public class GameManager {
                 break; // 找到并处理后就跳出循环
             }
         }
-        // [新增] 后门/彩蛋逻辑结束
+        */
 
         // 正常的空投逻辑继续执行
         Player targetPlayer = alive.get(random.nextInt(alive.size()));
@@ -229,7 +230,6 @@ public class GameManager {
         Player targetPlayer = alive.get(random.nextInt(alive.size()));
         Location loc = findRandomLocationNear(targetPlayer.getLocation(), 50);
         if (loc != null) {
-            // [修复] 使用 LootTables 枚举获取战利品表
             airdropManager.spawnAirdrop(loc, LootTables.VILLAGE_WEAPONSMITH.getLootTable());
             broadcastMessage(NamedTextColor.GOLD, "一个更精良的空投已降落，快去寻找！");
         }
@@ -243,7 +243,6 @@ public class GameManager {
             Location loc = findRandomLocationInBorder();
             if (loc == null) continue;
 
-            // [修复] 使用 LootTables 枚举获取战利品表
             LootTable loot = (random.nextDouble() < 0.3) ? LootTables.END_CITY_TREASURE.getLootTable() : LootTables.VILLAGE_WEAPONSMITH.getLootTable();
             airdropManager.spawnAirdrop(loc, loot);
         }
@@ -262,7 +261,6 @@ public class GameManager {
             Location loc = findRandomLocationNear(center, 50);
             if (loc == null) continue;
 
-            // [修复] 使用 LootTables 枚举获取战利品表
             LootTable loot = (random.nextDouble() < 0.7) ? LootTables.END_CITY_TREASURE.getLootTable() : LootTables.VILLAGE_WEAPONSMITH.getLootTable();
             airdropManager.spawnAirdrop(loc, loot);
         }
@@ -321,7 +319,6 @@ public class GameManager {
         setGameState(GameState.IDLE);
     }
 
-    // ... (其他方法保持不变)
     public void createGame(Player initiator, double fee) {
         if (gameState != GameState.IDLE) {
             initiator.sendMessage(Component.text("当前已有游戏正在进行！", NamedTextColor.RED));
@@ -410,6 +407,35 @@ public class GameManager {
         applySpectatorMode(player);
     }
 
+    public void convertToSpectatorOnTeleport(Player player, Location originalLocation) {
+        if (gameState != GameState.INGAME && gameState != GameState.PREPARING) {
+            player.teleport(Bukkit.getWorlds().get(0).getSpawnLocation());
+            return;
+        }
+        if (isPlayerInGame(player)) return;
+
+        if (!miniGameAPI.enterGame(player, plugin)) {
+            player.sendMessage(Component.text("你已在另一场游戏中，无法观战！", NamedTextColor.RED));
+            player.teleport(originalLocation); // 传送回原处
+            return;
+        }
+        if (!miniGameAPI.savePlayerData(player)) {
+            player.sendMessage(Component.text("错误：无法备份你的数据，无法进入观战。", NamedTextColor.RED));
+            miniGameAPI.leaveGame(player, plugin);
+            player.teleport(originalLocation); // 传送回原处
+            return;
+        }
+
+        GamePlayer gamePlayer = new GamePlayer(player.getUniqueId(), originalLocation);
+        gamePlayer.setState(PlayerState.SPECTATOR);
+        gamePlayers.put(player.getUniqueId(), gamePlayer);
+
+        player.sendMessage(Component.text("你已进入观战模式。", NamedTextColor.GREEN));
+        // 延迟一刻执行，确保传送完成后再应用模式
+        Bukkit.getScheduler().runTask(plugin, () -> applySpectatorMode(player));
+    }
+
+
     public void handleLeave(Player player) {
         GamePlayer gamePlayer = gamePlayers.get(player.getUniqueId());
         if (gamePlayer == null) {
@@ -432,9 +458,19 @@ public class GameManager {
                 }
                 break;
             case ALIVE:
-                player.sendMessage(Component.text("你已主动退出游戏，被视为淘汰。", NamedTextColor.YELLOW));
-                cleanupPlayerData(player, gamePlayer.getOriginalLocation());
-                broadcastMessage(NamedTextColor.AQUA, player.getName() + " 主动退出了游戏。 [" + (getAlivePlayerCount() - 1) + "/" + getParticipantCount() + " 剩余]");
+                // [修改] 玩家主动离开游戏时，变为观察者而不是直接退出
+                player.sendMessage(Component.text("你已主动退出战斗，进入观战模式。", NamedTextColor.YELLOW));
+
+                // 设置状态为观察者
+                gamePlayer.setState(PlayerState.SPECTATOR);
+
+                // 应用观察者模式
+                applySpectatorMode(player);
+
+                // 广播消息
+                broadcastMessage(NamedTextColor.AQUA, player.getName() + " 主动退出了战斗。 [" + getAlivePlayerCount() + "/" + getParticipantCount() + " 剩余]");
+
+                // 检查游戏是否结束
                 if (getAlivePlayerCount() <= 1) {
                     endGame();
                 }

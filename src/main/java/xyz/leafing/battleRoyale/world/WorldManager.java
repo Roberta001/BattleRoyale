@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.Random;
+import java.util.logging.Level;
 
 public class WorldManager {
 
@@ -60,30 +61,46 @@ public class WorldManager {
     public void deleteWorld(String worldName) {
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
-            plugin.getLogger().warning("Tried to delete a world that doesn't exist: " + worldName);
+            plugin.getLogger().warning("尝试删除一个不存在或已卸载的世界: " + worldName);
+            // 即使世界未加载，也尝试删除文件夹，以防上次失败残留
+            File worldFolder = new File(Bukkit.getWorldContainer(), worldName);
+            if (worldFolder.exists()) {
+                deleteWorldFolder(worldFolder);
+            }
             return;
         }
 
         // 确保没有玩家在里面
         for (Player player : world.getPlayers()) {
-            // 把玩家传送到主世界
             player.teleport(Bukkit.getServer().getWorlds().get(0).getSpawnLocation());
         }
 
         File worldFolder = world.getWorldFolder();
-        Bukkit.unloadWorld(world, false);
+        if (!Bukkit.unloadWorld(world, false)) {
+            plugin.getLogger().severe("严重错误: 无法卸载世界 " + worldName + "! 文件可能不会被删除。");
+            return;
+        }
 
+        deleteWorldFolder(worldFolder);
+    }
+
+    /**
+     * [新增] 将文件删除逻辑提取到一个单独的方法中，并增强错误处理
+     * @param worldFolder 要删除的世界文件夹
+     */
+    private void deleteWorldFolder(File worldFolder) {
         // 异步删除文件，防止卡服
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                plugin.getLogger().info("Attempting to delete world folder: " + worldFolder.getPath());
+                plugin.getLogger().info("正在尝试异步删除世界文件夹: " + worldFolder.getPath());
                 Files.walk(worldFolder.toPath())
                         .sorted(Comparator.reverseOrder())
                         .map(Path::toFile)
                         .forEach(File::delete);
-                plugin.getLogger().info("Successfully deleted world: " + worldName);
+                plugin.getLogger().info("成功删除世界文件夹: " + worldFolder.getName());
             } catch (IOException e) {
-                e.printStackTrace();
+                // [修复] 增加详细的错误日志
+                plugin.getLogger().log(Level.SEVERE, "删除世界文件夹 " + worldFolder.getName() + " 失败! 请手动删除此文件夹以释放磁盘空间。", e);
             }
         });
     }

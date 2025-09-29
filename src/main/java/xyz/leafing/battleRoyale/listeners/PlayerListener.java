@@ -25,8 +25,11 @@ import java.util.Objects;
 public class PlayerListener implements Listener {
 
     private final GameManager gameManager;
-    private static final List<String> BLOCKED_COMMANDS = Arrays.asList(
-            "spawn", "home", "tpa", "tpaccept", "warp", "back", "tpaall", "call", "tphere"
+
+    // [修改] 从指令黑名单改为白名单，更安全
+    private static final List<String> ALLOWED_COMMANDS = Arrays.asList(
+            "br", "battleroyale", // 插件主指令及其别名
+            "msg", "tell", "w", "r" // 私聊和回复指令
     );
 
     public PlayerListener(GameManager gameManager) {
@@ -116,9 +119,10 @@ public class PlayerListener implements Listener {
         Player player = event.getPlayer();
         if (gameManager.isPlayerAlive(player)) {
             String command = event.getMessage().substring(1).split(" ")[0].toLowerCase();
-            if (BLOCKED_COMMANDS.contains(command)) {
+            // [修改] 检查指令是否不在白名单中
+            if (!ALLOWED_COMMANDS.contains(command)) {
                 event.setCancelled(true);
-                player.sendMessage(Component.text("You cannot use this command during the game.", NamedTextColor.RED));
+                player.sendMessage(Component.text("游戏期间无法使用此指令。", NamedTextColor.RED));
             }
         }
     }
@@ -134,19 +138,20 @@ public class PlayerListener implements Listener {
             return; // 忽略同世界传送或无效世界
         }
 
-        boolean isEnteringGameWorld = toWorld.getName().equals(gameWorldName);
         boolean isLeavingGameWorld = fromWorld.getName().equals(gameWorldName);
+        boolean isEnteringGameWorld = toWorld.getName().equals(gameWorldName);
 
         // 处理存活玩家离开游戏世界
         if (isLeavingGameWorld && gameManager.isPlayerAlive(player)) {
             event.setCancelled(true);
-            player.sendMessage(Component.text("You cannot teleport out of the game world.", NamedTextColor.RED));
+            player.sendMessage(Component.text("你无法在存活时传送离开游戏世界。", NamedTextColor.RED));
         }
         // [修改] 处理非游戏玩家进入游戏世界
         else if (isEnteringGameWorld && !gameManager.isPlayerInGame(player)) {
-            // 取消原传送事件，交由 GameManager 处理，这样可以正确保存玩家传送前的位置
-            event.setCancelled(true);
-            gameManager.handleJoinAsSpectator(player);
+            // 不再取消传送事件，让玩家先传送过去
+            // 调用新的GameManager方法，将玩家无缝转换为观察者
+            // 传递 event.getFrom() 作为玩家的原始位置，以便游戏结束后能正确返回
+            gameManager.convertToSpectatorOnTeleport(player, event.getFrom());
         }
     }
 
