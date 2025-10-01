@@ -25,60 +25,16 @@ public class WorldManager {
         this.plugin = plugin;
     }
 
-    public static Location findSafeHighestLocation(World world, int startX, int startZ) {
-        record Coord(int x, int z) {}
-
-        Queue<Coord> queue = new LinkedList<>();
-        Set<Coord> visited = new HashSet<>();
-        final int MAX_CHECKS = 10000;
-        int checks = 0;
-
-        Coord startCoord = new Coord(startX, startZ);
-        queue.add(startCoord);
-        visited.add(startCoord);
-
-        while (!queue.isEmpty() && checks < MAX_CHECKS) {
-            Coord current = queue.poll();
-            checks++;
-
-            int y = world.getHighestBlockYAt(current.x(), current.z());
-
-            if (y >= world.getMinHeight()) {
-                Block highestBlock = world.getBlockAt(current.x(), y, current.z());
-                if (highestBlock.getType().isSolid() && !highestBlock.isLiquid()) {
-                    Location safeLoc = highestBlock.getLocation();
-                    safeLoc.setX(safeLoc.getBlockX() + 0.5);
-                    safeLoc.setY(safeLoc.getBlockY() + 1.0);
-                    safeLoc.setZ(safeLoc.getBlockZ() + 0.5);
-                    return safeLoc;
-                }
-            }
-
-            int[] dx = {0, 0, 1, -1};
-            int[] dz = {1, -1, 0, 0};
-
-            for (int i = 0; i < 4; i++) {
-                Coord neighbor = new Coord(current.x() + dx[i], current.z() + dz[i]);
-                if (!visited.contains(neighbor)) {
-                    visited.add(neighbor);
-                    queue.add(neighbor);
-                }
-            }
-        }
-
-        BattleRoyale.getInstance().getLogger().warning("BFS 搜索在 (" + startX + ", " + startZ + ") 附近检查了 " + checks + " 次后，未能找到安全地点。");
-        return null;
-    }
-
-
     public CompletableFuture<World> setupGameWorld(GameMap map) {
         String worldName = "br_" + map.getId() + "_" + System.currentTimeMillis();
 
         if (map.getWorldSourceType() == GameMap.WorldSourceType.COPY) {
             boolean importSettings = map.getSetting("world-source.import-level-dat-settings", false);
             if (importSettings) {
+                // 使用 level.dat 导入模式，支持复制额外文件夹（如 datapacks）
                 return createWorldFromLevelDat(map.getSourceFolderName(), worldName, map);
             } else {
+                // 完整复制世界文件夹
                 return copyWorldFolder(map.getSourceFolderName(), worldName).thenApplyAsync(success -> {
                     if (success) {
                         plugin.getLogger().info("成功完整复制世界 '" + map.getSourceFolderName() + "' 到 '" + worldName + "'。正在加载...");
@@ -94,10 +50,19 @@ public class WorldManager {
         }
     }
 
-    // [BUG修复] 此方法已重写，以避免移动或修改源文件
+    /**
+     * 根据源世界的 level.dat 创建一个新世界，并可以复制指定的额外文件夹（如 datapacks）。
+     * 这种方式允许使用自定义世界生成器，同时保持每次游戏地图的地形都是全新的。
+     * @param sourceFolderName 源世界模板文件夹名
+     * @param newWorldName 新游戏世界的名称
+     * @param map 游戏地图配置对象
+     * @return 一个包含已加载世界的 CompletableFuture
+     */
     private CompletableFuture<World> createWorldFromLevelDat(String sourceFolderName, String newWorldName, GameMap map) {
         return CompletableFuture.supplyAsync(() -> {
-            File sourceLevelDat = new File(plugin.getDataFolder(), "maps/worlds/" + sourceFolderName + "/level.dat");
+            File sourceWorldFolder = new File(plugin.getDataFolder(), "maps/worlds/" + sourceFolderName);
+            File sourceLevelDat = new File(sourceWorldFolder, "level.dat");
+
             if (!sourceLevelDat.exists()) {
                 plugin.getLogger().severe("源世界的 level.dat 文件不存在: " + sourceLevelDat.getPath());
                 return null;
@@ -111,25 +76,38 @@ public class WorldManager {
             File newLevelDat = new File(newWorldFolder, "level.dat");
 
             try {
-                // 1. 从源文件加载 NBT 数据到内存
+                // 步骤 1: 复制并修改 level.dat，设置新的随机种子
                 NBTFile sourceNbt = new NBTFile(sourceLevelDat);
                 NBTCompound data = sourceNbt.getCompound("Data");
-
-                // 2. 在内存中修改数据（设置新种子）
                 long newSeed = random.nextLong();
                 data.setLong("RandomSeed", newSeed);
+
+                NBTFile destNbt = new NBTFile(newLevelDat);
+                destNbt.addCompound("Data").mergeCompound(data);
+                destNbt.save();
                 plugin.getLogger().info("从 '" + sourceFolderName + "' 导入生成器设置，使用新种子: " + newSeed);
 
-                // 3. 创建一个新的 NBT 文件对象指向目标路径
-                NBTFile destNbt = new NBTFile(newLevelDat);
+                // 步骤 2: 从地图配置中读取并复制指定的额外文件夹
+                List<String> foldersToCopy = map.getSetting("world-source.folders-to-copy-on-import", new ArrayList<>());
+                if (!foldersToCopy.isEmpty()) {
+                    plugin.getLogger().info("正在从 '" + sourceFolderName + "' 复制额外文件夹: " + String.join(", ", foldersToCopy));
+                    for (String folderName : foldersToCopy) {
+                        File sourceSubFolder = new File(sourceWorldFolder, folderName);
+                        File destSubFolder = new File(newWorldFolder, folderName);
+                        if (sourceSubFolder.exists() && sourceSubFolder.isDirectory()) {
+                            try {
+                                copyDirectory(sourceSubFolder, destSubFolder);
+                                plugin.getLogger().info("  - 成功复制文件夹: " + folderName);
+                            } catch (IOException e) {
+                                plugin.getLogger().log(Level.SEVERE, "复制文件夹 '" + folderName + "' 时出错", e);
+                            }
+                        } else {
+                            plugin.getLogger().warning("  - 警告: 在源世界中找不到要复制的文件夹: " + folderName);
+                        }
+                    }
+                }
 
-                // 4. 将修改后的数据合并到新的 NBT 对象中
-                destNbt.addCompound("Data").mergeCompound(data);
-
-                // 5. 将新的 NBT 对象保存到目标文件，这会创建一个新的 level.dat
-                destNbt.save();
-
-                // 异步任务完成后，回到主线程加载世界
+                // 步骤 3: 切换回主线程加载世界
                 return Bukkit.getScheduler().callSyncMethod(plugin, () -> loadWorld(newWorldName, map)).get();
 
             } catch (Exception e) {
@@ -170,7 +148,7 @@ public class WorldManager {
             world.setDifficulty(difficulty);
             plugin.getLogger().info("世界 '" + world.getName() + "' 难度已设置为: " + difficulty);
         } catch (IllegalArgumentException e) {
-            plugin.getLogger().warning("无效的难度设置，将使用服务器默认值。");
+            plugin.getLogger().warning("无效的难度设置 '" + map.getSetting("world.difficulty", "NORMAL") + "'，将使用服务器默认值。");
         }
 
         world.setGameRule(GameRule.KEEP_INVENTORY, true);
@@ -207,7 +185,6 @@ public class WorldManager {
         }
     }
 
-
     private CompletableFuture<Boolean> copyWorldFolder(String sourceName, String destName) {
         return CompletableFuture.supplyAsync(() -> {
             File sourceDir = new File(plugin.getDataFolder(), "maps/worlds/" + sourceName);
@@ -216,33 +193,39 @@ public class WorldManager {
                 plugin.getLogger().severe("源世界文件夹不存在: " + sourceDir.getPath());
                 return false;
             }
-            try (Stream<Path> stream = Files.walk(sourceDir.toPath())) {
-                stream.forEach(sourcePath -> {
-                    try {
-                        // 排除 session.lock 文件，避免复制时出错
-                        if (sourcePath.getFileName().toString().equals("session.lock")) {
-                            return;
-                        }
-                        Path destPath = destDir.toPath().resolve(sourceDir.toPath().relativize(sourcePath));
-                        // 如果是目录，则创建
-                        if (Files.isDirectory(sourcePath)) {
-                            if (!Files.exists(destPath)) {
-                                Files.createDirectories(destPath);
-                            }
-                        } else {
-                            // 如果是文件，则复制
-                            Files.copy(sourcePath, destPath, StandardCopyOption.REPLACE_EXISTING);
-                        }
-                    } catch (IOException e) {
-                        throw new RuntimeException("无法复制文件: " + sourcePath, e);
-                    }
-                });
+            try {
+                copyDirectory(sourceDir, destDir);
                 return true;
             } catch (Exception e) {
                 plugin.getLogger().log(Level.SEVERE, "复制世界时出错", e);
                 return false;
             }
         });
+    }
+
+    /**
+     * 递归地将一个目录及其所有内容复制到目标位置。
+     * @param source 源文件夹
+     * @param destination 目标文件夹
+     * @throws IOException 如果发生 I/O 错误
+     */
+    private void copyDirectory(File source, File destination) throws IOException {
+        try (Stream<Path> stream = Files.walk(source.toPath())) {
+            stream.forEach(sourcePath -> {
+                try {
+                    // 排除 session.lock 文件，避免复制时出错
+                    if (sourcePath.getFileName().toString().equals("session.lock")) {
+                        return;
+                    }
+                    Path destPath = destination.toPath().resolve(source.toPath().relativize(sourcePath));
+                    // 使用 REPLACE_EXISTING 选项确保文件被覆盖，COPY_ATTRIBUTES 保持文件属性
+                    Files.copy(sourcePath, destPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                } catch (IOException e) {
+                    // 重新抛出为运行时异常，以便上层 CompletableFuture 的 supplyAsync 捕获
+                    throw new RuntimeException("无法复制文件: " + sourcePath, e);
+                }
+            });
+        }
     }
 
     public void deleteWorld(String worldName) {
@@ -280,5 +263,58 @@ public class WorldManager {
                 plugin.getLogger().log(Level.SEVERE, "删除世界文件夹 " + worldFolder.getName() + " 失败!", e);
             }
         });
+    }
+
+    /**
+     * 使用广度优先搜索 (BFS) 从指定坐标开始，寻找一个安全的、非液体方块的最高点。
+     * @param world 搜索的世界
+     * @param startX 起始 X 坐标
+     * @param startZ 起始 Z 坐标
+     * @return 一个安全的 Location 对象，如果找不到则返回 null
+     */
+    public static Location findSafeHighestLocation(World world, int startX, int startZ) {
+        record Coord(int x, int z) {}
+
+        Queue<Coord> queue = new LinkedList<>();
+        Set<Coord> visited = new HashSet<>();
+        final int MAX_CHECKS = 10000; // 搜索上限，防止无限循环
+        int checks = 0;
+
+        Coord startCoord = new Coord(startX, startZ);
+        queue.add(startCoord);
+        visited.add(startCoord);
+
+        while (!queue.isEmpty() && checks < MAX_CHECKS) {
+            Coord current = queue.poll();
+            checks++;
+
+            int y = world.getHighestBlockYAt(current.x(), current.z());
+
+            if (y >= world.getMinHeight()) {
+                Block highestBlock = world.getBlockAt(current.x(), y, current.z());
+                if (highestBlock.getType().isSolid() && !highestBlock.isLiquid()) {
+                    Location safeLoc = highestBlock.getLocation();
+                    safeLoc.setX(safeLoc.getBlockX() + 0.5);
+                    safeLoc.setY(safeLoc.getBlockY() + 1.0);
+                    safeLoc.setZ(safeLoc.getBlockZ() + 0.5);
+                    return safeLoc;
+                }
+            }
+
+            // 将邻近的坐标加入队列
+            int[] dx = {0, 0, 1, -1};
+            int[] dz = {1, -1, 0, 0};
+
+            for (int i = 0; i < 4; i++) {
+                Coord neighbor = new Coord(current.x() + dx[i], current.z() + dz[i]);
+                if (!visited.contains(neighbor)) {
+                    visited.add(neighbor);
+                    queue.add(neighbor);
+                }
+            }
+        }
+
+        BattleRoyale.getInstance().getLogger().warning("BFS 搜索在 (" + startX + ", " + startZ + ") 附近检查了 " + checks + " 次后，未能找到安全地点。");
+        return null;
     }
 }

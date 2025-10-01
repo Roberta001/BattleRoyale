@@ -15,12 +15,9 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.*;
-import org.bukkit.inventory.ItemStack;
 import xyz.leafing.battleRoyale.BattleRoyale;
 import xyz.leafing.battleRoyale.GameManager;
 import xyz.leafing.battleRoyale.GameState;
-import xyz.leafing.battleRoyale.GamePlayer;
-import xyz.leafing.battleRoyale.ui.MenuManager;
 
 import java.util.Arrays;
 import java.util.List;
@@ -30,8 +27,9 @@ public class PlayerListener implements Listener {
     private final GameManager gameManager;
     private final BattleRoyale plugin;
 
+    // 允许在游戏（INGAME状态）中使用的指令
     private static final List<String> ALLOWED_COMMANDS = Arrays.asList(
-            "br", "battleroyale", "msg", "tell", "w", "r"
+            "br", "battleroyale", "msg", "tell", "w", "r", "leave" // "leave" 可能是 /br leave 的别名
     );
 
     public PlayerListener(GameManager gameManager, BattleRoyale plugin) {
@@ -51,6 +49,7 @@ public class PlayerListener implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
+        // 玩家退出时，统一由 handleLeave 处理，它会根据游戏状态做不同操作
         if (gameManager.isPlayerInGame(player) || gameManager.isSpectating(player)) {
             gameManager.handleLeave(player);
         }
@@ -63,9 +62,7 @@ public class PlayerListener implements Listener {
             event.deathMessage(null);
             event.getDrops().clear();
             event.setDroppedExp(0);
-            // 强制玩家立即重生，以便 onPlayerRespawn 事件可以处理他们
             Bukkit.getScheduler().runTask(plugin, () -> victim.spigot().respawn());
-            // 处理淘汰逻辑（设置状态、广播消息等）
             gameManager.handleElimination(victim, victim.getKiller());
         }
     }
@@ -73,13 +70,10 @@ public class PlayerListener implements Listener {
     @EventHandler
     public void onPlayerRespawn(PlayerRespawnEvent event) {
         Player player = event.getPlayer();
-        // [修改] 当一个被淘汰的玩家重生时，将他们设置为内部观察者
         if (gameManager.isPlayerInGame(player) && !gameManager.isPlayerAlive(player)) {
-            // 将重生点设置在死亡位置，避免传送到世界出生点
             if (player.getLastDeathLocation() != null) {
                 event.setRespawnLocation(player.getLastDeathLocation());
             }
-            // 延迟一刻执行，确保重生完成
             Bukkit.getScheduler().runTask(plugin, () -> gameManager.applyInternalSpectatorMode(player));
         }
     }
@@ -100,8 +94,9 @@ public class PlayerListener implements Listener {
         if (gameManager.isPlayerFrozen(event.getPlayer())) {
             Location from = event.getFrom();
             Location to = event.getTo();
-            if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) {
-                event.setCancelled(true);
+            // 仅在方块坐标移动时取消，允许视角转动
+            if (from.getBlockX() != to.getBlockX() || from.getBlockY() != to.getBlockY() || from.getBlockZ() != to.getBlockZ()) {
+                event.setTo(from);
             }
         }
     }
@@ -123,7 +118,9 @@ public class PlayerListener implements Listener {
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
-        if (gameManager.isPlayerAlive(player)) {
+        // [BUG修复] 指令白名单开启的时机错误，应该在游戏正式开始后再开始限制
+        // 现在只有在 INGAME 状态下，存活的玩家才会受到指令限制
+        if (gameManager.getGameState() == GameState.INGAME && gameManager.isPlayerAlive(player)) {
             String command = event.getMessage().substring(1).split(" ")[0].toLowerCase();
             if (!ALLOWED_COMMANDS.contains(command)) {
                 event.setCancelled(true);
@@ -150,6 +147,7 @@ public class PlayerListener implements Listener {
             event.setCancelled(true);
             player.sendMessage(Component.text("你无法在存活时传送离开游戏世界。", NamedTextColor.RED));
         } else if (isEnteringGameWorld && !gameManager.isPlayerInGame(player) && !gameManager.isSpectating(player)) {
+            // 如果一个非游戏玩家尝试进入游戏世界，自动让他观战
             event.setCancelled(true);
             gameManager.handleSpectate(player);
         }
