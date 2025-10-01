@@ -13,7 +13,11 @@ public enum PlayerState {
      */
     ALIVE,
     /**
-     * 在游戏中，但已被淘汰，作为旁观者。
+     * 在游戏中，但已被淘汰，作为旁观者。（参赛者）
      */
-    SPECTATOR
+    SPECTATOR,
+    /**
+     * 中途加入的纯旁观者，非参赛者。
+     */
+    EXTERNAL_SPECTATOR
 }

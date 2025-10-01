@@ -5,10 +5,10 @@ import org.bukkit.block.Chest;
 import org.bukkit.loot.LootTable;
 import org.bukkit.scheduler.BukkitTask;
 import xyz.leafing.battleRoyale.BattleRoyale;
+import xyz.leafing.battleRoyale.world.WorldManager; // 引入 WorldManager
 
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 管理游戏中的空投生成、特效和清理。
@@ -31,8 +31,17 @@ public class AirdropManager {
         World world = location.getWorld();
         if (world == null) return;
 
-        // 确保位置安全，将箱子放在最高固体方块之上
-        Location chestLocation = world.getHighestBlockAt(location).getLocation().add(0, 1, 0);
+        // 使用 WorldManager 中的 BFS 方法寻找一个安全的降落点
+        // 返回的 location 已经是最高固体方块的 y+1 位置
+        Location chestLocation = WorldManager.findSafeHighestLocation(world, location.getBlockX(), location.getBlockZ());
+
+        // 如果找不到安全位置（例如，整个区域都是虚空），则取消本次空投
+        if (chestLocation == null) {
+            plugin.getLogger().warning("在 X:" + location.getBlockX() + ", Z:" + location.getBlockZ() + " 附近找不到安全的空投降落点。取消本次空投。");
+            return;
+        }
+
+        // 在安全位置上生成箱子
         chestLocation.getBlock().setType(Material.CHEST);
 
         // 设置战利品表

@@ -30,7 +30,7 @@ public class BRCommand implements CommandExecutor {
         Player player = (Player) sender;
 
         if (args.length == 0) {
-            menuManager.openMainMenu(player); // 默认打开菜单
+            menuManager.openMainMenu(player);
             return true;
         }
 
@@ -45,8 +45,8 @@ public class BRCommand implements CommandExecutor {
                 }
                 try {
                     double amount = Double.parseDouble(args[1]);
-                    if (amount <= 0) {
-                        player.sendMessage(Component.text("金额必须为正数。", NamedTextColor.RED));
+                    if (amount < 0) {
+                        player.sendMessage(Component.text("金额不能为负数。", NamedTextColor.RED));
                         return true;
                     }
                     gameManager.createGame(player, amount);
@@ -58,8 +58,10 @@ public class BRCommand implements CommandExecutor {
                 gameManager.handleJoinLobby(player);
                 break;
             case "leave":
-                // [重构] 统一调用 handleLeave，所有逻辑都在 GameManager 中处理
                 gameManager.handleLeave(player);
+                break;
+            case "spectate":
+                gameManager.handleSpectate(player);
                 break;
             case "forcestart":
                 if (!player.hasPermission("br.admin")) {
@@ -79,8 +81,9 @@ public class BRCommand implements CommandExecutor {
         player.sendMessage(Component.text("--- 大逃杀 帮助 ---", NamedTextColor.GOLD));
         player.sendMessage(Component.text("/br menu", NamedTextColor.AQUA).append(Component.text(" - 打开游戏菜单。", NamedTextColor.GRAY)));
         player.sendMessage(Component.text("/br create <金额>", NamedTextColor.AQUA).append(Component.text(" - 开始一场新游戏。", NamedTextColor.GRAY)));
-        player.sendMessage(Component.text("/br join", NamedTextColor.AQUA).append(Component.text(" - 加入当前游戏。", NamedTextColor.GRAY)));
-        player.sendMessage(Component.text("/br leave", NamedTextColor.AQUA).append(Component.text(" - 离开游戏或大厅。", NamedTextColor.GRAY)));
+        player.sendMessage(Component.text("/br join", NamedTextColor.AQUA).append(Component.text(" - 加入当前游戏大厅。", NamedTextColor.GRAY)));
+        player.sendMessage(Component.text("/br leave", NamedTextColor.AQUA).append(Component.text(" - 离开游戏、大厅或观战。", NamedTextColor.GRAY)));
+        player.sendMessage(Component.text("/br spectate", NamedTextColor.AQUA).append(Component.text(" - 观战当前正在进行的游戏。", NamedTextColor.GRAY)));
         if (player.hasPermission("br.admin")) {
             player.sendMessage(Component.text("/br forcestart", NamedTextColor.RED).append(Component.text(" - (管理员) 强制开始游戏。", NamedTextColor.GRAY)));
         }

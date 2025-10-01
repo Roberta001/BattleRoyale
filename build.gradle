@@ -13,8 +13,9 @@ repositories {
         url = "https://repo.papermc.io/repository/maven-public/"
     }
     maven { url 'https://jitpack.io' }
-    // **核心修改：使用 Multiverse 5.0 的新仓库地址**
-    maven { url = "https://repo.onarandombox.com/content/groups/public/" }
+    repositories {
+        maven { url 'https://repo.codemc.io/repository/maven-public/' }
+    }
 }
 
 dependencies {
@@ -24,9 +25,8 @@ dependencies {
         exclude group: 'org.bukkit', module: 'bukkit'
     }
 
-    // **核心修改：使用全新的、正确的 Multiverse 5.0 坐标**
-    compileOnly 'org.mvplugins.multiverse.core:multiverse-core:5.0.0-SNAPSHOT'
     implementation 'com.github.Roberta001:MiniGameManager:1.0.1-SNAPSHOT'
+    compileOnly 'de.tr7zw:item-nbt-api-plugin:2.12.2' // 请检查并使用最新版本
 }
 
 tasks {

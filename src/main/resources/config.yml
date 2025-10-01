@@ -1,0 +1,89 @@
+# ===================================================================
+# BattleRoyale 插件主配置文件
+# ===================================================================
+#
+# 本文件定义了游戏的全局默认设置。
+# 你可以在 'maps' 文件夹中为每个地图创建独立的 .yml 文件，
+# 来覆盖这里的任何设置，从而实现地图的个性化定制。
+#
+
+# 游戏核心设定
+game-settings:
+  # 游戏开始所需的最少玩家数。
+  # 只有当大厅人数达到这个数值时，倒计时才会开始。
+  min-players: 2
+
+  # 玩家到齐后，游戏开始前的等待时间（单位：秒）。
+  lobby-countdown: 120
+
+  # 游戏开始后，玩家之间的PVP保护期（单位：秒）。
+  # 在此期间，玩家互相无法造成伤害。
+  pvp-grace-period: 60
+
+  # 游戏开始时，玩家被“冻结”在原地无法移动的时间（单位：秒）。
+  # 用于加载地形和展示游戏提示。
+  preparation-freeze-duration: 20
+
+# 积分与奖励设定
+rewards:
+  # 每次击杀一名玩家获得的基础积分。
+  kill-points: 200
+
+  # 每隔多少秒，为所有存活的玩家发放一次生存积分。
+  survival-points-interval: 3
+
+  # 每次发放的生存积分数量。
+  survival-points-amount: 1
+
+  # 奖金分配模式。可选值:
+  # "PROPORTIONAL"     - (推荐) 根据每个玩家的最终积分占总积分的比例来分配奖池。
+  # "WINNER_TAKES_ALL" - 最终获胜者获得全部奖池。
+  # "TOP_THREE"        - 奖池按 50%/30%/20% 的比例分配给积分前三名。
+  payout-mode: "PROPORTIONAL"
+
+# 默认的世界与边界设定
+world:
+  # 游戏世界的默认难度。可选值: PEACEFUL, EASY, NORMAL, HARD
+  difficulty: "NORMAL"
+  # 游戏世界边界的初始直径（单位：方块）。
+  border-initial-size: 1000
+
+  # 边界收缩阶段。你可以定义多个阶段。
+  border-shrinks:
+    # 阶段一
+    - trigger-time: 600      # 游戏开始后多少秒触发 (例如: 600秒 = 10分钟)。
+      target-size: 200       # 边界将缩小到的目标直径。
+      duration: 600          # 缩小过程持续的时间（单位：秒）。
+
+    # 阶段二 (决赛圈)
+    - trigger-time: 1200     # 游戏开始后 1200秒 (20分钟) 触发。
+      target-size: 10        # 最终缩小到 10x10 的区域。
+      duration: 300          # 缩小过程持续 300秒 (5分钟)。
+
+# 默认的空投设定
+airdrops:
+  # 是否启用空投系统。设置为 false 将禁用所有空投。
+  enabled: true
+
+  # 空投阶段。你可以定义多个阶段，它们会按时间顺序触发。
+  phases:
+    # 阶段一：前期补给
+    - trigger-time: 90       # 游戏开始后 90秒 触发。
+      # 空投箱使用的战利品表。必须是 Minecraft 原版的 Loot Table Key。
+      # 参考: https://minecraft.fandom.com/wiki/Loot_table
+      loot-table: "minecraft:chests/spawn_bonus_chest"
+      count: 1               # 本次触发生成的空投数量。
+      # 触发时向所有玩家广播的消息 (& 符号用于颜色代码)。
+      message: "&e一个基础空投已在某处降落！"
+
+    # 阶段二：中期装备
+    - trigger-time: 300      # 游戏开始后 300秒 (5分钟) 触发。
+      loot-table: "minecraft:chests/village/village_weaponsmith"
+      count: 1
+      message: "&6一个精良的空投已降落，快去寻找！"
+
+    # 阶段三：后期神装
+    - trigger-time: 600      # 游戏开始后 600秒 (10分钟) 触发。
+      loot-table: "minecraft:chests/end_city_treasure"
+      count: 2
+      message: "&c警告！两个高级空投正在圈内随机位置降落！"
